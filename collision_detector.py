@@ -1,216 +1,149 @@
 import numpy as np
-from scipy.spatial.transform import Rotation as R
-from QuadrotorDynamics import QuadrotorDynamics
-from NarrowGap import NarrowGap
 
 
-class Box3D:
-    """三维长方体类，用于表示UAV、缺口和墙体边框"""
+class CollisionDetector:
+    """四旋翼与矩形通道碰撞检测系统（修复左壁误判问题）"""
 
-    def __init__(self, center, size, orientation):
-        """
-        初始化三维长方体
-        :param center: 中心坐标 (x, y, z)
-        :param size: 尺寸 (length, width, depth)
-        :param orientation: 欧拉角 (roll, pitch, yaw)，单位弧度，顺序为X→Y→Z轴
-        """
-        self.center = np.array(center, dtype=np.float64)
-        self.size = np.array(size, dtype=np.float64)
-        self.orientation = np.array(orientation, dtype=np.float64)
+    def __init__(self):
+        self.epsilon = 1e-4  # 增大容差减少浮点误差影响
+        self.safety_margin = 0.01  # 安全余量，避免边界误判
 
-    def __repr__(self):
-        return f"Box3D(center={self.center}, size={self.size}, orientation={self.orientation})"
+    def check_channel_collision(self, quadrotor, gap):
+        quad_vertices = quadrotor.get_vertices()
 
+        # 重新定义四个平面（修正左壁法线方向和判断逻辑）
+        planes = [
+            # 上平面（天花板）
+            {
+                'normal': -gap.gap_z,
+                'point': gap.center + gap.gap_z * gap.gap_half_height,
+                'type': 'ceiling',
+                'inside_side': lambda d: d > self.safety_margin  # 明确侵入内部才判定
+            },
+            # 下平面（地板）
+            {
+                'normal': gap.gap_z,
+                'point': gap.center - gap.gap_z * gap.gap_half_height,
+                'type': 'floor',
+                'inside_side': lambda d: d > self.safety_margin
+            },
+            # 左平面（左侧壁）- 关键修正：法线方向和侵入判断
+            {
+                'normal': gap.gap_y,  # 修正法线方向（原方向可能反了）
+                'point': gap.center + gap.gap_y * gap.gap_half_length,
+                'type': 'left_wall',
+                'inside_side': lambda d: d < -self.safety_margin  # 左壁内侧在负方向
+            },
+            # 右平面（右侧壁）
+            {
+                'normal': -gap.gap_y,  # 同步修正右壁法线
+                'point': gap.center - gap.gap_y * gap.gap_half_length,
+                'type': 'right_wall',
+                'inside_side': lambda d: d < -self.safety_margin
+            }
+        ]
 
-def euler_to_rotation(euler):
-    """将欧拉角转换为旋转矩阵"""
-    return R.from_euler('xyz', euler).as_matrix()
+        for plane in planes:
+            if self._check_plane_collision(quad_vertices, plane):
+                return True  # 碰撞返回True
 
+        return False  # 未碰撞返回False
 
-def decompose_wall(ng: NarrowGap) -> list:
-    """
-    根据NarrowGap参数，拆分出4个实体边框
-    :param ng: NarrowGap对象
-    :return: 4个边框的Box3D对象列表 [上, 下, 左, 右]
-    """
-    # 从NarrowGap获取尺寸参数
-    wall_length = ng.wall_length
-    wall_height = ng.wall_height
-    wall_thickness = ng.wall_thickness
-    gap_length = ng.gap_length
-    gap_height = ng.gap_height
+    def _check_plane_collision(self, vertices, plane):
+        """改进的平面碰撞检测：严格判断顶点是否侵入通道内部"""
+        normal = plane['normal']
+        plane_point = plane['point']
+        inside_side = plane['inside_side']
 
-    # 验证墙体尺寸是否大于缺口尺寸
-    if wall_length <= gap_length or wall_height <= gap_height:
-        raise ValueError("墙体尺寸必须大于缺口尺寸")
+        # 计算所有顶点到平面的带符号距离
+        signed_distances = [np.dot(vertex - plane_point, normal) for vertex in vertices]
 
-    # 计算尺寸差
-    delta_length = wall_length - gap_length  # 长度方向总间隙
-    delta_width = wall_height - gap_height  # 宽度方向总间隙
-
-    # 边框尺寸
-    top_bottom_size = [gap_length, delta_width / 2, wall_thickness]  # 上下边框
-    left_right_size = [delta_length / 2, gap_height, wall_thickness]  # 左右边框
-
-    # 获取旋转矩阵
-    rotation = euler_to_rotation([0, ng.wall_tilt, ng.rotation])
-
-    # 计算各边框的中心位置
-    top_center = ng.center + rotation @ np.array([0, gap_height / 2 + delta_width / 4, 0])
-    bottom_center = ng.center + rotation @ np.array([0, -gap_height / 2 - delta_width / 4, 0])
-    left_center = ng.center + rotation @ np.array([-gap_length / 2 - delta_length / 4, 0, 0])
-    right_center = ng.center + rotation @ np.array([gap_length / 2 + delta_length / 4, 0, 0])
-
-    # 创建并返回4个边框
-    return [
-        Box3D(top_center, top_bottom_size, [0, ng.wall_tilt, ng.rotation]),
-        Box3D(bottom_center, top_bottom_size, [0, ng.wall_tilt, ng.rotation]),
-        Box3D(left_center, left_right_size, [0, ng.wall_tilt, ng.rotation]),
-        Box3D(right_center, left_right_size, [0, ng.wall_tilt, ng.rotation])
-    ]
-
-
-def get_rotated_vertices(box):
-    """计算旋转后的长方体顶点坐标"""
-    half_size = box.size / 2
-    local_vertices = np.array([
-        [half_size[0], half_size[1], half_size[2]],
-        [half_size[0], half_size[1], -half_size[2]],
-        [half_size[0], -half_size[1], half_size[2]],
-        [half_size[0], -half_size[1], -half_size[2]],
-        [-half_size[0], half_size[1], half_size[2]],
-        [-half_size[0], half_size[1], -half_size[2]],
-        [-half_size[0], -half_size[1], half_size[2]],
-        [-half_size[0], -half_size[1], -half_size[2]]
-    ])
-    rotation = euler_to_rotation(box.orientation)
-    return np.array([rotation @ v + box.center for v in local_vertices])
-
-
-def get_face_normals(vertices):
-    """从顶点获取长方体的6个面法线"""
-    faces = [
-        [0, 1, 3, 2], [4, 5, 7, 6],  # 前后面
-        [0, 1, 5, 4], [2, 3, 7, 6],  # 上下
-        [0, 2, 6, 4], [1, 3, 7, 5]  # 左右
-    ]
-    normals = []
-    for face in faces:
-        v1 = vertices[face[1]] - vertices[face[0]]
-        v2 = vertices[face[2]] - vertices[face[0]]
-        normal = np.cross(v1, v2)
-        norm = np.linalg.norm(normal)
-        if norm > 1e-10:
-            normals.append(normal / norm)
-    return normals
-
-def get_edge_vectors(vertices):
-    """从顶点获取长方体的12条边向量"""
-    edges = [
-        [0, 1], [1, 3], [3, 2], [2, 0],  # 前面
-        [4, 5], [5, 7], [7, 6], [6, 4],  # 后面
-        [0, 4], [1, 5], [2, 6], [3, 7]  # 连接边
-    ]
-    return [vertices[e[1]] - vertices[e[0]] for e in edges]
-
-
-def get_edge_cross_axes(verticesA, verticesB):
-    """计算两个长方体边向量的叉积作为潜在分离轴"""
-    edgesA = get_edge_vectors(verticesA)
-    edgesB = get_edge_vectors(verticesB)
-    cross_axes = []
-    for edgeA in edgesA:
-        for edgeB in edgesB:
-            cross = np.cross(edgeA, edgeB)
-            norm = np.linalg.norm(cross)
-            if norm > 1e-10:
-                cross_axes.append(cross / norm)
-    return cross_axes
-
-
-def project_vertices(vertices, axis):
-    """将顶点投影到指定轴上，返回投影的最小值和最大值"""
-    projections = [np.dot(v, axis) for v in vertices]
-    return min(projections), max(projections)
-
-
-def sat_collision(boxA, boxB):
-    """使用分离轴定理检测两个长方体是否碰撞"""
-    verticesA = get_rotated_vertices(boxA)
-    verticesB = get_rotated_vertices(boxB)
-
-    axes = []
-    axes.extend(get_face_normals(verticesA))
-    axes.extend(get_face_normals(verticesB))
-    axes.extend(get_edge_cross_axes(verticesA, verticesB))
-
-    for axis in axes:
-        minA, maxA = project_vertices(verticesA, axis)
-        minB, maxB = project_vertices(verticesB, axis)
-        if maxA < minB - 1e-6 or maxB < minA - 1e-6:
+        # 关键修复：只有存在顶点明确侵入通道内侧时才继续检测
+        if not any(inside_side(d) for d in signed_distances):
             return False
-    return True
 
+        # SAT检测：检查所有可能的分离轴
+        axes = self._get_sat_axes_for_plane(vertices, normal)
+        for axis in axes:
+            if not self._overlap_on_axis(vertices, plane_point, axis, normal):
+                return False
 
-def uav_to_box3d(uav: QuadrotorDynamics) -> Box3D:
-    """将QuadrotorDynamics对象转换为Box3D对象"""
-    return Box3D(
-        center=uav.position,
-        size=uav.size,
-        orientation=uav.orientation
-    )
+        return True
 
+    def _get_sat_axes_for_plane(self, vertices, plane_normal):
+        """生成更全面的分离轴，确保倾斜状态下的检测准确性"""
+        axes = [plane_normal]
 
-def check_collision(uav: QuadrotorDynamics, ng: NarrowGap) -> bool:
-    """
-    检查UAV是否与墙上的缺口边框发生碰撞
-    :param uav: QuadrotorDynamics实例
-    :param ng: NarrowGap实例
-    :return: 布尔值，True表示发生碰撞，False表示未发生碰撞
-    """
-    uav_box = uav_to_box3d(uav)
-    borders = decompose_wall(ng)
+        if len(vertices) >= 8:
+            # 重新计算四旋翼的边向量（与get_vertices定义保持一致）
+            edges = [
+                vertices[1] - vertices[0],  # z方向边
+                vertices[2] - vertices[0],  # y方向边
+                vertices[4] - vertices[0],  # x方向边
+                vertices[3] - vertices[2],  # z方向边
+                vertices[5] - vertices[4],  # z方向边
+                vertices[6] - vertices[4]  # y方向边
+            ]
 
-    for border in borders:
-        if sat_collision(uav_box, border):
-            return True
-    return False
+            # 添加边向量作为分离轴
+            for edge in edges:
+                edge_norm = np.linalg.norm(edge)
+                if edge_norm > self.epsilon:
+                    axes.append(edge / edge_norm)
 
+            # 添加法线与边向量的叉乘轴（处理倾斜情况）
+            for edge in edges:
+                edge_norm = np.linalg.norm(edge)
+                if edge_norm > self.epsilon:
+                    normalized_edge = edge / edge_norm
+                    cross_axis = np.cross(plane_normal, normalized_edge)
+                    cross_norm = np.linalg.norm(cross_axis)
+                    if cross_norm > self.epsilon:
+                        axes.append(cross_axis / cross_norm)
 
-# 测试代码
-if __name__ == "__main__":
-    # 创建测试环境
-    ng = NarrowGap(
-        center=(5, 0, 1),
-        wall_length=2.0,
-        wall_height=2.0,
-        wall_thickness=0.1,
-        wall_pitch=30,  # 度
-        gap_length=0.7,
-        gap_height=0.36,
-        rotation=0
-    )
+        return axes
 
-    # 创建无人机实例
-    uav = QuadrotorDynamics()
-    uav.reset(position=[0, 0, 1], orientation=[0, 0, 0])
+    def _overlap_on_axis(self, vertices, plane_point, axis, plane_normal):
+        """改进投影重叠判断，增加方向补偿"""
+        # 四旋翼顶点投影
+        quad_proj = [np.dot(vertex, axis) for vertex in vertices]
+        quad_min, quad_max = min(quad_proj), max(quad_proj)
 
-    # 测试1: UAV在初始位置，无碰撞
-    print("测试1 - UAV在初始位置:", check_collision(uav, ng))  # 应返回False
+        # 平面投影
+        plane_proj = np.dot(plane_point, axis)
 
-    # 测试2: UAV在缝隙中心，无碰撞
-    uav.position = np.array([5, 0, 1])
-    print("测试2 - UAV在缝隙中心:", check_collision(uav, ng))  # 应返回False
+        # 根据平面法线与轴的夹角动态调整容差
+        dot_product = np.dot(axis, plane_normal)
+        tolerance = self.epsilon / abs(dot_product) if abs(dot_product) > self.epsilon else self.epsilon
 
-    # 测试3: UAV靠近上边框，应碰撞
-    uav.position = np.array([5, 0.5, 1])
-    print("测试3 - UAV靠近上边框:", check_collision(uav, ng))  # 应返回True
+        # 检查投影是否重叠（增加方向判断）
+        if dot_product > 0:
+            # 平面法线与轴同向：平面外侧为投影小于平面位置
+            return not (quad_max < plane_proj - tolerance)
+        else:
+            # 平面法线与轴反向：平面外侧为投影大于平面位置
+            return not (quad_min > plane_proj + tolerance)
 
-    # 测试4: UAV靠近右边框，应碰撞
-    uav.position = np.array([5.5, 0, 1])
-    print("测试4 - UAV靠近右边框:", check_collision(uav, ng))  # 应返回True
+    def simple_distance_check(self, quadrotor, gap):
+        """快速距离检查，过滤明显无碰撞的情况"""
+        quad_position = quadrotor.position
+        rel_pos = quad_position - gap.center
 
-    # 测试5: UAV旋转后靠近边框
-    uav.position = np.array([4.5, 0, 1])
-    uav.orientation = np.array([0, 0, np.pi / 4])  # 45度偏航
-    print("测试5 - UAV旋转后靠近左边框:", check_collision(uav, ng))  # 应返回True
+        # 计算四旋翼在缝隙局部坐标系中的位置
+        local_y = np.dot(rel_pos, gap.gap_y)
+        local_z = np.dot(rel_pos, gap.gap_z)
+
+        # 考虑四旋翼自身尺寸的边界检查
+        quad_half_y = quadrotor.size[1] / 2  # 四旋翼y方向半尺寸
+        quad_half_z = quadrotor.size[2] / 2  # 四旋翼z方向半尺寸
+
+        # 只有当四旋翼可能进入缝隙范围时才进行详细检测
+        if (abs(local_y) > gap.gap_half_length + quad_half_y + self.safety_margin or
+                abs(local_z) > gap.gap_half_height + quad_half_z + self.safety_margin):
+            return False
+        return True
+
+    def efficient_collision_check(self, quadrotor, gap):
+        if not self.simple_distance_check(quadrotor, gap):
+            return False  # 未碰撞返回False
+        return self.check_channel_collision(quadrotor, gap)  # 返回碰撞检测结果（True/False）

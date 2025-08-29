@@ -16,8 +16,8 @@ class QuadrotorDynamics:
         """初始化无人机物理参数（与论文完全一致）"""
         # 状态变量
         self.position = np.array([0.0, 10, 0.0], dtype=np.float64)
-        self.orientation_deg = np.zeros(3, dtype=np.float64)
-        self.orientation = np.radians(self.orientation_deg)  # [roll,pitch,yaw] 角度,[0,2Π],[-0.5Π,0.5Π][0,2Π]
+        self.orientation = np.zeros(3, dtype=np.float64)
+        self.orientation = np.radians(self.orientation)  # [roll,pitch,yaw] 角度,[0,2Π],[-0.5Π,0.5Π][0,2Π]
         self.velocity = np.zeros(3, dtype=np.float64)  # [vX,vY,vZ] 线速度 (m/s),Body Frame
         self.angular_velocity = np.zeros(3, dtype=np.float64)  # [ωX,ωY,ωZ] 角速度 (rad/s),Body Frame
 
@@ -46,7 +46,8 @@ class QuadrotorDynamics:
             orientation: [roll,pitch,yaw] 初始姿态 (rad)
         """
         self.position = np.array(position, dtype=np.float64)
-        self.orientation = np.array(orientation, dtype=np.float64)
+        self.orientation = np.radians(orientation)
+        self.orientation = np.array(self.orientation, dtype=np.float64)
         self.velocity = np.zeros(3)
         self.angular_velocity = np.zeros(3)
 
@@ -209,3 +210,30 @@ class QuadrotorDynamics:
         # 计算电机转速平方并裁剪
         motor_speeds_sq = np.linalg.pinv(allocation_matrix) @ control_input
         return np.sqrt(np.clip(motor_speeds_sq, 0, self.max_motor_speed ** 2))
+
+    def get_vertices(self):
+        """计算无人机的8个顶点坐标（世界坐标系）"""
+        # 无人机半尺寸
+        half_x = self.size[0] / 2
+        half_y = self.size[1] / 2
+        half_z = self.size[2] / 2
+
+        # 机体坐标系下的顶点
+        local_vertices = np.array([
+            [half_x, half_y, half_z],  # 前右上
+            [half_x, half_y, -half_z],  # 前右下
+            [half_x, -half_y, half_z],  # 前左上
+            [half_x, -half_y, -half_z],  # 前左下
+            [-half_x, half_y, half_z],  # 后右上
+            [-half_x, half_y, -half_z],  # 后右下
+            [-half_x, -half_y, half_z],  # 后左上
+            [-half_x, -half_y, -half_z],  # 后左下
+        ], dtype=np.float64)
+
+        # 转换到世界坐标系
+        rot_matrix = self.rot  # 从姿态获取旋转矩阵
+        world_vertices = np.array([
+            self.position + rot_matrix @ v for v in local_vertices
+        ])
+
+        return world_vertices

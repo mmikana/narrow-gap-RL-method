@@ -4,7 +4,7 @@ from gymnasium import spaces
 
 from QuadrotorDynamics import QuadrotorDynamics
 from NarrowGap import NarrowGap
-from collision_detector import check_collision
+from collision_detector import CollisionDetector
 
 
 class QuadrotorEnv(gym.Env):
@@ -16,6 +16,7 @@ class QuadrotorEnv(gym.Env):
         # 状态：位置(3) + 速度(3) + 姿态(3) + 角速度(3)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12,))
         # NarrowGap初始化，wall中心坐标，高长厚度，gap中心坐标、长宽
+        self.detector = CollisionDetector()
 
         self.NarrowGap = NarrowGap()
         self.goal_position = np.array([0, 0.25, 0])  # 缝隙后25cm处
@@ -42,11 +43,9 @@ class QuadrotorEnv(gym.Env):
         self.uav.reset(position=[0, 0, 1], orientation=[0, 0, 0])
         self.apply_randomization()
         self.current_step = 0
-
         # 重置轨迹记录
         self.uav_trajectory = [self.uav.position.copy()]
         self.uav_orientation_history = [self.uav.orientation.copy()]
-
 
         return self.uav.get_obs(), {}
 
@@ -73,7 +72,7 @@ class QuadrotorEnv(gym.Env):
 
         # 终止条件
         terminated = (
-                check_collision(self.uav, self.NarrowGap) or
+                self.detector.efficient_collision_check(self.uav, self.NarrowGap) or
                 self.achieve_goal() or
                 np.linalg.norm(self.uav.position) > 20.0 or
                 self.current_step >= self.max_steps
@@ -82,11 +81,11 @@ class QuadrotorEnv(gym.Env):
         truncated = False
 
         # 碰撞惩罚
-        if check_collision(self.uav, self.NarrowGap):
+        if self.detector.efficient_collision_check(self.uav, self.NarrowGap):
             reward -= 1000
 
         info = {
-            "collision": check_collision(self.uav, self.NarrowGap),
+            "collision": self.detector.efficient_collision_check(self.uav, self.NarrowGap),
             "goal_achieved": self.achieve_goal(),
             "distance_to_goal": np.linalg.norm(self.uav.position - self.goal_position),
             "steps": self.current_step
@@ -119,7 +118,7 @@ class QuadrotorEnv(gym.Env):
             self.NarrowGap = NarrowGap(
                 gap_length=level['gap_size'][0],
                 gap_height=level['gap_size'][1],
-                wall_tilt=level['tilt']
+                tilt=level['tilt']
             )
 
     def enter_gap(self):
@@ -139,7 +138,7 @@ class QuadrotorEnv(gym.Env):
         dist_to_gap = (self.uav.position - self.NarrowGap.center) @ self.NarrowGap.normal
 
         # 判断是否到达达目标区域
-        goal_distance = 0.5 * self.NarrowGap.wall_thickness + 0.5 * self.uav.size[0]
+        goal_distance = 0.5 * self.NarrowGap.gap_thickness + 0.5 * self.uav.size[0]
         if dist_to_gap > goal_distance:
             return True
         return False
