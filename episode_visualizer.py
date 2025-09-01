@@ -36,7 +36,7 @@ class EpisodeVisualizer:
         trajectory: 位置轨迹数组 [n_steps, 3]
         orientations: 姿态角数组 [n_steps, 3] (roll, pitch, yaw in radians)
         velocities: 速度数组 [n_steps, 3]
-        narrow_gap: NarrowGap对象
+        narrow_gap: NarrowGap对象（新版定义，仅包含缝隙）
         goal_position: 目标位置 [3]
         step_interval: 每隔多少步显示一个姿态箭头
         """
@@ -48,7 +48,7 @@ class EpisodeVisualizer:
 
         # 1. 绘制3D轨迹
         self._plot_3d_trajectory(trajectory, orientations, narrow_gap, goal_position,
-                                 step_interval)  # 修复：传入orientations
+                                 step_interval)
 
         # 2. 绘制位置随时间变化
         self._plot_position_vs_time(time_steps, trajectory)
@@ -66,7 +66,7 @@ class EpisodeVisualizer:
         plt.show()
 
     def _plot_3d_trajectory(self, trajectory, orientations, narrow_gap, goal_position, step_interval):
-        """绘制3D轨迹图"""
+        """绘制3D轨迹图，适配新版NarrowGap定义"""
         # 绘制轨迹
         self.ax_3d.plot(trajectory[:, 0], trajectory[:, 1], trajectory[:, 2],
                         'b-', alpha=0.6, linewidth=2, label='Trajectory')
@@ -78,7 +78,7 @@ class EpisodeVisualizer:
 
         # 绘制姿态箭头（每隔step_interval步）
         for i in range(0, len(trajectory), step_interval):
-            if i < len(trajectory) and i < len(orientations):  # 添加边界检查
+            if i < len(trajectory) and i < len(orientations):
                 pos = trajectory[i]
                 rot = R.from_euler('xyz', [orientations[i][0], orientations[i][1], orientations[i][2]]).as_matrix()
 
@@ -91,12 +91,25 @@ class EpisodeVisualizer:
                                       direction[0], direction[1], direction[2],
                                       color=color, arrow_length_ratio=0.2, linewidth=1, alpha=0.7)
 
-        # 绘制缝隙
-        gap_corners = narrow_gap.get_gap_corners()
-        gap_x = [p[0] for p in gap_corners] + [gap_corners[0][0]]
-        gap_y = [p[1] for p in gap_corners] + [gap_corners[0][1]]
-        gap_z = [p[2] for p in gap_corners] + [gap_corners[0][2]]
-        self.ax_3d.plot(gap_x, gap_y, gap_z, 'r-', linewidth=3, label='Gap')
+        # 绘制缝隙（适配新版NarrowGap，仅绘制缝隙本身的8个角点）
+        gap_corners = narrow_gap.get_gap_corners()  # 从NarrowGap对象获取计算好的角点
+
+        # 定义缝隙的12条棱边（连接8个角点形成长方体）
+        edges = [
+            # 正面四边形（x正方向）
+            [0, 1], [1, 2], [2, 3], [3, 0],
+            # 背面四边形（x负方向）
+            [4, 5], [5, 6], [6, 7], [7, 4],
+            # 连接正背面的四条边
+            [0, 4], [1, 5], [2, 6], [3, 7]
+        ]
+
+        # 绘制缝隙的所有棱边
+        for edge in edges:
+            p1 = gap_corners[edge[0]]
+            p2 = gap_corners[edge[1]]
+            self.ax_3d.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                            'r-', linewidth=3, label='Gap' if edge == edges[0] else "")
 
         # 绘制目标点
         self.ax_3d.scatter(goal_position[0], goal_position[1], goal_position[2],
@@ -163,7 +176,7 @@ class EpisodeVisualizer:
         key_indices = [0, len(trajectory) // 4, len(trajectory) // 2, 3 * len(trajectory) // 4, -1]
 
         for i, idx in enumerate(key_indices):
-            if idx < len(trajectory) and idx < len(orientations):  # 添加边界检查
+            if idx < len(trajectory) and idx < len(orientations):
                 roll, pitch, yaw = orientations[idx]
 
                 # 在2D平面上显示姿态
