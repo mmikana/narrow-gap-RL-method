@@ -20,6 +20,7 @@ env = QuadrotorEnv()
 STATE_DIM = env.observation_space.shape[0]  # 应该是12
 ACTION_DIM = env.action_space.shape[0]  # 应该是4
 
+
 print(f"State dimension: {STATE_DIM}")
 print(f"Action dimension: {ACTION_DIM}")
 
@@ -135,6 +136,7 @@ for episode_i in range(EPISODE_NUM):
             os.makedirs(plot_dir, exist_ok=True)
             visualizer.save_plot(f"{plot_dir}episode_{episode_i}_{timestamp}.png")
 
+        plt.show()
         plt.close('all')  # 关闭所有图表避免内存泄漏
 
     # 打印训练进度
