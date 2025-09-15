@@ -21,8 +21,13 @@ class QuadrotorEnv(gym.Env):
         self.NarrowGap = NarrowGap()
         self.goal_position = np.array([0, 0.25, 0])  # 缝隙后25cm处
 
+        self.gamma = 0.99
         self.max_steps = 500
         self.current_step = 0
+
+        # Reward settings
+        self.reward_achievegoal = 1000
+        self.collision_penalty = 1000
 
         # curriculum learning
         self.current_difficulty = 0
@@ -51,6 +56,7 @@ class QuadrotorEnv(gym.Env):
 
     def step(self, action):
         self.current_step += 1
+        reward_step = 0
 
         # 动作执行
         motor_speeds = self.uav.normalized_action_to_motor_speeds(action)
@@ -62,13 +68,13 @@ class QuadrotorEnv(gym.Env):
 
         # 奖励计算
         if self.achieve_goal():
-            reward = 1000
+            reward_step += self.reward_achievegoal
         else:
             distance = np.linalg.norm(self.uav.position - self.goal_position)
-            reward = -distance
+            reward_step += distance
             orientation_penalty = -np.linalg.norm(self.uav.orientation) * 0.1
             velocity_penalty = -np.linalg.norm(self.uav.velocity) * 0.05
-            reward += orientation_penalty + velocity_penalty
+            reward_step += orientation_penalty + velocity_penalty
 
         # 终止条件
         terminated = (
@@ -82,7 +88,7 @@ class QuadrotorEnv(gym.Env):
 
         # 碰撞惩罚
         if self.detector.efficient_collision_check(self.uav, self.NarrowGap):
-            reward -= 1000
+            reward_step += self.collision_penalty
 
         info = {
             "collision": self.detector.efficient_collision_check(self.uav, self.NarrowGap),
@@ -95,9 +101,9 @@ class QuadrotorEnv(gym.Env):
         self.trajectory_history.append(self.uav.position.copy())
         self.orientation_history.append(self.uav.orientation.copy())
         self.velocity_history.append(self.uav.velocity.copy())
-        self.reward_history.append(reward)
+        self.reward_history.append(reward_step)
 
-        return self.uav.get_obs(), reward, terminated, truncated, info
+        return self.uav.get_obs(), reward_step, terminated, truncated, info
 
     def apply_randomization(self):
         """应用环境随机化"""

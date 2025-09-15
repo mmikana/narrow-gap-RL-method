@@ -26,18 +26,26 @@ class QuadrotorDynamics:
         self.local_y = np.array([0, 1, 0])
         self.local_z = np.array([0, 0, 1])
         self.inertial_x = np.array([1, 0, 0])
-        self.inertial_y = np.array([1, 0, 0])
-        self.inertial_z = np.array([1, 0, 0])
+        self.inertial_y = np.array([0, 1, 0])
+        self.inertial_z = np.array([0, 0, 1])
 
         # 物理参数（论文第5页C）
         self.mass = 1.2  # 质量 (kg)
+        self.g = 9.81  # 重力加速度
+        self.k_d = 0.1  # 空气阻力系数
         self.inertia = np.diag([0.007, 0.007, 0.014])  # 惯性矩阵 (kg·m²)
         self.size = np.array([0.47, 0.47, 0.23])  # 假设无人机尺寸 0.47x0.47x0.23m
         self.arm_length = self.size[0] * np.sqrt(2) / 2  # X型机臂对角线长度 (m)
         self.C_T = 6e-6  # 推力系数 (N/(rad/s)^2)
         self.C_M = 8e-8  # 扭矩系数 (N·m/(rad/s)^2)
         self.max_motor_speed = 1500  # 电机最大转速 (rad/s)
+        self.d_phi, self.d_theta, self.d_psi = 0.01, 0.01, 0.02  # 需要根据实际调整
 
+        # 电机滞后响应参数
+        self.delta_M = 0.05  # 电机的单步响应时间间隔，可根据实际情况调整
+        self.dt = 0.02  # 无人机仿真环境的单步运行时间，与update函数中的dt保持一致
+        self.c = np.exp(-self.dt / self.delta_M)  # 电机滞后响应系数
+        self.prev_motor_speeds = np.zeros(4)  # 上一时刻的电机转速
 
     def reset(self, position, orientation):
         """重置无人机状态
@@ -81,59 +89,65 @@ class QuadrotorDynamics:
             motor_speeds: [ω1,ω2,ω3,ω4] 四个电机转速 (rad/s)
             dt: 时间步长 (s)
         """
-        # 1. 计算推力和扭矩（公式3）
-        thrusts = self.C_T * np.square(motor_speeds)
-        torques = self.C_M * np.square(motor_speeds)
+        # 根据电机滞后响应公式更新电机转速
+        current_motor_speeds = self.c * self.prev_motor_speeds + (1 - self.c) * motor_speeds
+        self.prev_motor_speeds = current_motor_speeds
 
-        # 2. 计算总推力和力矩
-        total_thrust = np.sum(thrusts)  # 总推力 (N)
-        tau_phi = self.arm_length * (thrusts[0] - thrusts[1] - thrusts[2] + thrusts[3])  # 滚转力矩
-        tau_theta = self.arm_length * (thrusts[0] + thrusts[1] - thrusts[2] - thrusts[3])  # 俯仰力矩
-        tau_psi = np.sum([torques[0], -torques[1], torques[2], -torques[3]])  # 偏航力矩
+        # 保存当前状态
+        current_orientation = self.orientation.copy()
+        current_angular_velocity = self.angular_velocity.copy()
+        current_position = self.position.copy()
+        current_velocity = self.velocity.copy()
 
-        # 3. 计算角加速度（公式1）
-        omega = self.angular_velocity
-        angular_acc = np.array([
-            (tau_phi - (self.inertia[1, 1] - self.inertia[2, 2]) * omega[1] * omega[2]) / self.inertia[0, 0],
-            (tau_theta - (self.inertia[2, 2] - self.inertia[0, 0]) * omega[0] * omega[2]) / self.inertia[1, 1],
-            (tau_psi - (self.inertia[0, 0] - self.inertia[1, 1]) * omega[0] * omega[1]) / self.inertia[2, 2]
-        ])
+        # 计算总推力（在RK4步骤中保持不变）
+        _, total_thrust = self.compute_angular_acceleration(motor_speeds, current_orientation, current_angular_velocity)
 
-        # 4. 更新角速度和姿态（欧拉法）
-        self.angular_velocity += angular_acc * dt
-        self.orientation += self.angular_velocity * dt
-        # 角度归一化到[-π, π]
+        # RK4积分 - 角速度
+        k1_omega = self.compute_angular_acceleration(current_motor_speeds, current_orientation, current_angular_velocity)[0]
+        k2_omega = self.compute_angular_acceleration(current_motor_speeds, current_orientation,
+                                                     current_angular_velocity + 0.5 * dt * k1_omega)[0]
+        k3_omega = self.compute_angular_acceleration(current_motor_speeds, current_orientation,
+                                                     current_angular_velocity + 0.5 * dt * k2_omega)[0]
+        k4_omega = \
+        self.compute_angular_acceleration(current_motor_speeds, current_orientation, current_angular_velocity + dt * k3_omega)[
+            0]
+
+        self.angular_velocity = current_angular_velocity + (dt / 6.0) * (
+                    k1_omega + 2 * k2_omega + 2 * k3_omega + k4_omega)
+
+        # RK4积分 - 姿态（使用平均角速度）
+        k1_orientation = current_angular_velocity
+        k2_orientation = current_angular_velocity + 0.5 * dt * k1_omega
+        k3_orientation = current_angular_velocity + 0.5 * dt * k2_omega
+        k4_orientation = current_angular_velocity + dt * k3_omega
+
+        self.orientation = current_orientation + (dt / 6.0) * (
+                    k1_orientation + 2 * k2_orientation + 2 * k3_orientation + k4_orientation)
         self.orientation = (self.orientation + np.pi) % (2 * np.pi) - np.pi
 
-        '''
-        # 4. 更新角速度和姿态（二阶泰勒展开）
-        self.orientation += (self.angular_velocity * dt + 0.5 * self.angular_velocity * dt ** 2)
-        self.angular_velocity += angular_acc * dt
-        # 角度归一化到[-π, π]
-        self.orientation = (self.orientation + np.pi) % (2 * np.pi) - np.pi
-        '''
+        # RK4积分 - 速度
+        k1_vel = self.compute_linear_acceleration(current_orientation, current_velocity, total_thrust)
+        k2_vel = self.compute_linear_acceleration(current_orientation, current_velocity + 0.5 * dt * k1_vel,
+                                                  total_thrust)
+        k3_vel = self.compute_linear_acceleration(current_orientation, current_velocity + 0.5 * dt * k2_vel,
+                                                  total_thrust)
+        k4_vel = self.compute_linear_acceleration(current_orientation, current_velocity + dt * k3_vel, total_thrust)
 
+        self.velocity = current_velocity + (dt / 6.0) * (k1_vel + 2 * k2_vel + 2 * k3_vel + k4_vel)
+
+        # RK4积分 - 位置（使用平均速度）
+        k1_pos = current_velocity
+        k2_pos = current_velocity + 0.5 * dt * k1_vel
+        k3_pos = current_velocity + 0.5 * dt * k2_vel
+        k4_pos = current_velocity + dt * k3_vel
+
+        self.position = current_position + (dt / 6.0) * (k1_pos + 2 * k2_pos + 2 * k3_pos + k4_pos)
         rot = Rotation.from_euler('xyz', self.orientation).as_matrix()
+
         # 局部坐标变惯性坐标系
         self.inertial_x = rot @ self.local_x
         self.inertial_y = rot @ self.local_y
         self.inertial_z = rot @ self.local_z
-        # 5. 计算线加速度（论文公式2）
-        thrust_vector = rot @ np.array([0, 0, total_thrust])  # 机体坐标系转世界坐标系
-        gravity = np.array([0, 0, -9.81 * self.mass])  # 重力
-        drag_force = -0.1 * np.abs(self.velocity) * self.velocity  # 简化的空气阻力模型
-
-        acceleration = (thrust_vector + gravity + drag_force) / self.mass
-
-        # 6. 更新速度和位置（欧拉法）
-        self.velocity += acceleration * dt
-        self.position += self.velocity * dt
-
-        '''
-        # 6. 更新速度和位置（二阶泰勒展开法）
-        self.position += (self.velocity * dt + 0.5 * acceleration * dt ** 2)
-        self.velocity += acceleration * dt
-        '''
 
     def normalized_motor_speeds2motor_speeds(self, normalized_motor_speeds):
         """将归一化的电机转速转换为真实电机转速
@@ -193,11 +207,11 @@ class QuadrotorDynamics:
         # 控制分配矩阵（公式3的伪逆）
         allocation_matrix = np.array([
             [self.C_T, self.C_T, self.C_T, self.C_T],
-            [self.arm_length * self.C_T, -self.arm_length * self.C_T, -self.arm_length * self.C_T,
-             self.arm_length * self.C_T],
-            [self.arm_length * self.C_T, self.arm_length * self.C_T, -self.arm_length * self.C_T,
-             -self.arm_length * self.C_T],
-            [self.C_M, -self.C_M, self.C_M, -self.C_M]
+            [np.sqrt(2) / 2 * self.arm_length * self.C_T, -np.sqrt(2) / 2 * self.arm_length * self.C_T,
+             -np.sqrt(2) / 2 * self.arm_length * self.C_T, np.sqrt(2) / 2 * self.arm_length * self.C_T],
+            [np.sqrt(2) / 2 * self.arm_length * self.C_T, np.sqrt(2) / 2 * self.arm_length * self.C_T,
+             -np.sqrt(2) / 2 * self.arm_length * self.C_T, -np.sqrt(2) / 2 * self.arm_length * self.C_T],
+            [-self.C_M, self.C_M, -self.C_M, self.C_M]  # 注意符号：CW为正，CCW为负
         ])
 
         # 计算控制输入
@@ -237,3 +251,46 @@ class QuadrotorDynamics:
         ])
 
         return world_vertices
+
+    def compute_angular_acceleration(self, motor_speeds, orientation, angular_velocity):
+        """计算角加速度（考虑姿态相关的气动力矩）"""
+        thrusts = self.C_T * np.square(motor_speeds)
+        torques = self.C_M * np.square(motor_speeds)
+
+        total_thrust = np.sum(thrusts)
+        tau_phi = np.sqrt(2) / 2 * self.arm_length * (thrusts[0] + thrusts[1] - thrusts[2] - thrusts[3])
+        tau_theta = np.sqrt(2) / 2 * self.arm_length * (-thrusts[0] + thrusts[1] + thrusts[2] - thrusts[3])
+        tau_psi = np.sum([-torques[0], torques[1], -torques[2], torques[3]])
+
+        omega = angular_velocity
+
+        # 姿态相关的阻尼系数（示例：俯仰角越大，俯仰阻尼越小）
+        roll, pitch, yaw = orientation
+        d_phi_effective = self.d_phi * (1 - 0.3 * abs(pitch) / np.pi)  # 俯仰角影响滚转阻尼
+        d_theta_effective = self.d_theta * (1 - 0.2 * abs(roll) / np.pi)  # 滚转角影响俯仰阻尼
+        d_psi_effective = self.d_psi
+
+        # 考虑姿态的气动力矩（示例模型）
+        aero_moment_roll = -d_phi_effective * omega[0] - 0.05 * pitch * omega[1]
+        aero_moment_pitch = -d_theta_effective * omega[1] - 0.05 * roll * omega[0]
+        aero_moment_yaw = -d_psi_effective * omega[2]
+
+        angular_acc = np.array([
+            (tau_phi - (self.inertia[1, 1] - self.inertia[2, 2]) * omega[1] * omega[2] + aero_moment_roll) / self.inertia[
+                0, 0],
+            (tau_theta - (self.inertia[2, 2] - self.inertia[0, 0]) * omega[0] * omega[2] + aero_moment_pitch) /
+            self.inertia[1, 1],
+            (tau_psi - (self.inertia[0, 0] - self.inertia[1, 1]) * omega[0] * omega[1] + aero_moment_yaw) / self.inertia[
+                2, 2]
+        ])
+
+        return angular_acc, total_thrust
+
+    def compute_linear_acceleration(self, orientation, velocity, total_thrust):
+        """计算线加速度（用于RK4）"""
+        rot = Rotation.from_euler('xyz', orientation).as_matrix()
+        thrust_vector = rot @ np.array([0, 0, total_thrust])
+        gravity = np.array([0, 0, -self.g * self.mass])
+        drag_force = -self.k_d * velocity * np.linalg.norm(velocity)
+
+        return (thrust_vector + gravity + drag_force) / self.mass
