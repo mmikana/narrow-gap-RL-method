@@ -28,6 +28,8 @@ class QuadrotorEnv(gym.Env):
         # Reward settings
         self.reward_achievegoal = 1000
         self.collision_penalty = 1000
+        self.e_0_p = 0.5  # 姿态控制有效距离
+        self.epsilon_orientation = 0.5  # 姿态奖励系数
 
         # curriculum learning
         self.current_difficulty = 0
@@ -70,11 +72,17 @@ class QuadrotorEnv(gym.Env):
         if self.achieve_goal():
             reward_step += self.reward_achievegoal
         else:
-            distance = np.linalg.norm(self.uav.position - self.goal_position)
-            reward_step += distance
-            orientation_penalty = -np.linalg.norm(self.uav.orientation) * 0.1
-            velocity_penalty = -np.linalg.norm(self.uav.velocity) * 0.05
-            reward_step += orientation_penalty + velocity_penalty
+            # 位置奖励，计算公式e_t^g=∥p ̂_t-p^g ∥_2^2，r_t^p=exp(-e_t^g )
+            e_t_p = np.linalg.norm(self.uav.position - self.goal_position)
+            reward_distance = np.exp(e_t_p)
+            reward_step += reward_distance
+            # 姿态奖励，计算公式r_s^p (t)=-(h_t^p )^2 [1-exp(-ε(e_t^θ )^2 )]
+            h_t_p = np.maximum(1 - (e_t_p / self.e_0_p), 0)
+            e_t_theta = np.arccos(np.dot(self.uav.inertial_x, self.NarrowGap.normal)
+                                  / (np.linalg.norm(self.uav.inertial_x) * np.linalg.norm(self.NarrowGap.normal) + 1e-10))  # deg
+            reward_orientation = -np.square(h_t_p) * (1 - np.exp(-self.epsilon_orientation * np.square(e_t_theta)))
+            reward_step += reward_orientation
+            # 电机调速惩罚,  TODO
 
         # 终止条件
         terminated = (

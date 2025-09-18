@@ -103,48 +103,42 @@ class QuadrotorDynamics:
         _, total_thrust = self.compute_angular_acceleration(motor_speeds, current_orientation, current_angular_velocity)
 
         # RK4积分 - 角速度
-        k1_omega = self.compute_angular_acceleration(current_motor_speeds, current_orientation, current_angular_velocity)[0]
-        k2_omega = self.compute_angular_acceleration(current_motor_speeds, current_orientation,
-                                                     current_angular_velocity + 0.5 * dt * k1_omega)[0]
-        k3_omega = self.compute_angular_acceleration(current_motor_speeds, current_orientation,
-                                                     current_angular_velocity + 0.5 * dt * k2_omega)[0]
-        k4_omega = \
-        self.compute_angular_acceleration(current_motor_speeds, current_orientation, current_angular_velocity + dt * k3_omega)[
-            0]
+        self.angular_velocity = self._rk4_integrate(
+            current_angular_velocity, dt,
+            lambda omega, ms, ori: self.compute_angular_acceleration(ms, ori, omega)[0],
+            current_motor_speeds, current_orientation
+        )
 
-        self.angular_velocity = current_angular_velocity + (dt / 6.0) * (
-                    k1_omega + 2 * k2_omega + 2 * k3_omega + k4_omega)
-
-        # RK4积分 - 姿态（使用平均角速度）
-        k1_orientation = current_angular_velocity
-        k2_orientation = current_angular_velocity + 0.5 * dt * k1_omega
-        k3_orientation = current_angular_velocity + 0.5 * dt * k2_omega
-        k4_orientation = current_angular_velocity + dt * k3_omega
-
-        self.orientation = current_orientation + (dt / 6.0) * (
-                    k1_orientation + 2 * k2_orientation + 2 * k3_orientation + k4_orientation)
+        # RK4积分 - 姿态（使用角速度）
+        self.orientation = self._rk4_integrate(
+            current_orientation, dt,
+            lambda ori, omega: omega,
+            current_angular_velocity
+        )
         self.orientation = (self.orientation + np.pi) % (2 * np.pi) - np.pi
 
         # RK4积分 - 速度
-        k1_vel = self.compute_linear_acceleration(current_orientation, current_velocity, total_thrust)
-        k2_vel = self.compute_linear_acceleration(current_orientation, current_velocity + 0.5 * dt * k1_vel,
-                                                  total_thrust)
-        k3_vel = self.compute_linear_acceleration(current_orientation, current_velocity + 0.5 * dt * k2_vel,
-                                                  total_thrust)
-        k4_vel = self.compute_linear_acceleration(current_orientation, current_velocity + dt * k3_vel, total_thrust)
+        self.velocity = self._rk4_integrate(
+            current_velocity, dt,
+            lambda vel, ori, thrust: self.compute_linear_acceleration(ori, vel, thrust),
+            current_orientation, total_thrust
+        )
 
-        self.velocity = current_velocity + (dt / 6.0) * (k1_vel + 2 * k2_vel + 2 * k3_vel + k4_vel)
-
-        # RK4积分 - 位置（使用平均速度）
+        # RK4积分 - 位置（直接使用RK4公式，因为导数就是速度）
         k1_pos = current_velocity
-        k2_pos = current_velocity + 0.5 * dt * k1_vel
-        k3_pos = current_velocity + 0.5 * dt * k2_vel
-        k4_pos = current_velocity + dt * k3_vel
+        k2_pos = current_velocity + 0.5 * dt * self.compute_linear_acceleration(current_orientation, current_velocity,
+                                                                                total_thrust)
+        k3_pos = current_velocity + 0.5 * dt * self.compute_linear_acceleration(current_orientation,
+                                                                                current_velocity + 0.5 * dt * k1_pos,
+                                                                                total_thrust)
+        k4_pos = current_velocity + dt * self.compute_linear_acceleration(current_orientation,
+                                                                          current_velocity + 0.5 * dt * k2_pos,
+                                                                          total_thrust)
 
         self.position = current_position + (dt / 6.0) * (k1_pos + 2 * k2_pos + 2 * k3_pos + k4_pos)
-        rot = Rotation.from_euler('xyz', self.orientation).as_matrix()
 
         # 局部坐标变惯性坐标系
+        rot = Rotation.from_euler('xyz', self.orientation).as_matrix()
         self.inertial_x = rot @ self.local_x
         self.inertial_y = rot @ self.local_y
         self.inertial_z = rot @ self.local_z
@@ -294,3 +288,22 @@ class QuadrotorDynamics:
         drag_force = -self.k_d * velocity * np.linalg.norm(velocity)
 
         return (thrust_vector + gravity + drag_force) / self.mass
+
+    def _rk4_integrate(self, current_state, dt, derivative_func, *args):
+        """通用的RK4积分函数
+
+        Args:
+            current_state: 当前状态值
+            dt: 时间步长
+            derivative_func: 计算导数的函数，格式为 f(state, *args) -> derivative
+            *args: 传递给derivative_func的额外参数
+
+        Returns:
+            积分后的新状态
+        """
+        k1 = derivative_func(current_state, *args)
+        k2 = derivative_func(current_state + 0.5 * dt * k1, *args)
+        k3 = derivative_func(current_state + 0.5 * dt * k2, *args)
+        k4 = derivative_func(current_state + dt * k3, *args)
+
+        return current_state + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)

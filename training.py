@@ -3,6 +3,7 @@ import torch
 import os
 import time
 import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter
 
 from episode_visualizer import EpisodeVisualizer
 from ENV import QuadrotorEnv
@@ -82,7 +83,6 @@ for episode_i in range(EPISODE_NUM):
             break
         steps_per_episodes += 1
 
-
     # 记录本回合数据
     reward_buffer.append(reward_episode)
     episode_lengths.append(steps_per_episodes)
@@ -109,9 +109,8 @@ for episode_i in range(EPISODE_NUM):
         torch.save(agent.critic_2.state_dict(), model_dir + f'quadrotor_critic2_best_{timestamp}.pth')
         print(f"✓ Saving model with best avg reward: {reward_best:.2f}")
 
-
     # 定期可视化episode
-    if ( episode_i + 1 ) % VISUALIZE_INTERVAL == 0 and episode_i > 0:
+    if (episode_i + 1) % VISUALIZE_INTERVAL == 0 and episode_i > 0:
         print(f"📊 可视化第 {episode_i} 回合的飞行数据...")
 
         # 获取当前episode数据
@@ -141,7 +140,8 @@ for episode_i in range(EPISODE_NUM):
 
     # 打印训练进度
     print(
-        f'{episode_i:<8} {reward_episode:<10.2f} {reward_avg:<12.2f} {steps_per_episodes:<8} {episode_success:<8} {episode_collision:<10}')
+        f'{episode_i:<8} {reward_episode:<10.2f} {reward_avg:<12.2f} {steps_per_episodes:<8} {episode_success:<8}'
+        f' {episode_collision:<10}')
 
     # 如果连续成功，增加难度（课程学习）
     if recent_success_rate > 70 and hasattr(env, 'increase_difficulty'):
@@ -150,7 +150,7 @@ for episode_i in range(EPISODE_NUM):
 
 env.close()
 
-'''
+
 # 保存最终模型
 torch.save(agent.actor.state_dict(), model_dir + f'quadrotor_actor_final_{timestamp}.pth')
 torch.save(agent.critic_1.state_dict(), model_dir + f'quadrotor_critic1_final_{timestamp}.pth')
@@ -218,4 +218,3 @@ if PLOT_REWARD:
 print("Training completed!")
 print(f"Best average reward: {reward_best:.2f}")
 print(f"Final success rate: {np.mean(success_rates[-20:]) * 100:.1f}%")
-'''

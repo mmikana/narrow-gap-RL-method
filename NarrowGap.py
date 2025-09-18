@@ -16,8 +16,8 @@ class NarrowGap:
                  gap_length=0.7,  # 缝隙在y方向的长度
                  gap_height=0.36,  # 缝隙在z方向的高度
                  gap_thickness=0.1,  # 缝隙在x方向的厚度
-                 tilt=0.0,  # 缝隙绕y轴相对于xy面的倾斜角（度）
-                 rotation=0.0  # 缝隙绕中心的旋转角度（度）
+                 tilt=30,  # 缝隙绕y轴相对于xy面的倾斜角（度）
+                 rotation=30  # 缝隙绕中心的旋转角度（度）
                  ):
         # 转换为float64并标准化单位（度→弧度）
         self.center = np.array(center, dtype=np.float64)
