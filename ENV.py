@@ -26,10 +26,13 @@ class QuadrotorEnv(gym.Env):
         self.current_step = 0
 
         # Reward settings
-        self.reward_achievegoal = 1000
-        self.collision_penalty = 1000
+        self.reward_achievegoal = 80
+        self.collision_penalty = -40
         self.e_0_p = 0.5  # 姿态控制有效距离
-        self.epsilon_orientation = 0.5  # 姿态奖励系数
+        self.orientation_weight = 1.5  # 姿态奖励权重
+        self.position_weight = 2  # 位置奖励权重
+        self.speed_weight = 0.6
+        self.ideal_speed = 1.5  # 理想穿越速度 m/s
 
         # curriculum learning
         self.current_difficulty = 0
@@ -68,35 +71,37 @@ class QuadrotorEnv(gym.Env):
         self.uav_trajectory.append(self.uav.position.copy())
         self.uav_orientation_history.append(self.uav.orientation.copy())
 
+        # 碰撞惩罚
+        if self.detector.efficient_collision_check(self.uav, self.NarrowGap):
+            reward_step += self.collision_penalty
         # 奖励计算
-        if self.achieve_goal():
+        elif self.achieve_goal():
             reward_step += self.reward_achievegoal
         else:
             # 位置奖励，计算公式e_t^g=∥p ̂_t-p^g ∥_2^2，r_t^p=exp(-e_t^g )
             e_t_p = np.linalg.norm(self.uav.position - self.goal_position)
-            reward_distance = np.exp(e_t_p)
+            reward_distance = self.position_weight * np.exp(e_t_p)
             reward_step += reward_distance
+
             # 姿态奖励，计算公式r_s^p (t)=-(h_t^p )^2 [1-exp(-ε(e_t^θ )^2 )]
             h_t_p = np.maximum(1 - (e_t_p / self.e_0_p), 0)
             e_t_theta = np.arccos(np.dot(self.uav.inertial_x, self.NarrowGap.normal)
                                   / (np.linalg.norm(self.uav.inertial_x) * np.linalg.norm(self.NarrowGap.normal) + 1e-10))  # deg
-            reward_orientation = -np.square(h_t_p) * (1 - np.exp(-self.epsilon_orientation * np.square(e_t_theta)))
+            reward_orientation = -np.square(h_t_p) * (1 - np.exp(-self.orientation_weight * np.square(e_t_theta)))
             reward_step += reward_orientation
+            # 速度奖励
+            speed_reward = -self.speed_weight * abs(self.uav.velocity - self.ideal_speed) / self.ideal_speed
+            reward_step += speed_reward
             # 电机调速惩罚,  TODO
 
         # 终止条件
         terminated = (
                 self.detector.efficient_collision_check(self.uav, self.NarrowGap) or
                 self.achieve_goal() or
-                np.linalg.norm(self.uav.position) > 20.0 or
                 self.current_step >= self.max_steps
         )
 
         truncated = False
-
-        # 碰撞惩罚
-        if self.detector.efficient_collision_check(self.uav, self.NarrowGap):
-            reward_step += self.collision_penalty
 
         info = {
             "collision": self.detector.efficient_collision_check(self.uav, self.NarrowGap),
