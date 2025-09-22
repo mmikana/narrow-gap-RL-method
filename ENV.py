@@ -90,7 +90,7 @@ class QuadrotorEnv(gym.Env):
             reward_orientation = -np.square(h_t_p) * (1 - np.exp(-self.orientation_weight * np.square(e_t_theta)))
             reward_step += reward_orientation
             # 速度奖励
-            speed_reward = -self.speed_weight * abs(self.uav.velocity - self.ideal_speed) / self.ideal_speed
+            speed_reward = -self.speed_weight * abs(np.linalg.norm(self.uav.velocity) - self.ideal_speed) / self.ideal_speed
             reward_step += speed_reward
             # 电机调速惩罚,  TODO
 

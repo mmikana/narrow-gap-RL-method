@@ -212,7 +212,8 @@ if PLOT_REWARD:
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig(f"Training_Results_{timestamp}.png", dpi=300, bbox_inches='tight')
+    training_plots = current_path +'/training_plots/'
+    plt.savefig(f"{training_plots}Training_Results_{timestamp}.png", dpi=300, bbox_inches='tight')
     plt.show()
 
 print("Training completed!")
