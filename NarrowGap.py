@@ -1,4 +1,4 @@
-'''
+"""
 2025/08/19
 Narrow Gap的定义方法：center坐标[X,X,X]，默认wall和gap的中心重合；wall的length、height、thickness
 相对于水平面的倾斜角度tilt；gap的length、width；wall和center同时绕center的旋转角度rotation（为了方便sat检测）；默认xy为水平面；
@@ -6,9 +6,10 @@ Narrow Gap的定义方法：center坐标[X,X,X]，默认wall和gap的中心重�
 2025/08/28
 去除关于墙的定义，Narrow Gap的定义方法：center坐标[x,y,z]，gap的length、height、thickness，length<>y thickness<>x height<>z
 相对于xy面的倾斜角度tilt；绕center的旋转角度rotation
-'''
+"""
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+
 
 class NarrowGap:
     def __init__(self,
@@ -58,20 +59,17 @@ class NarrowGap:
         self.gap_y = rot.apply(rotated_y)  # y方向（length）
         self.gap_z = rot.apply(rotated_z)  # z方向（height）
 
-        # 4. 计算缝隙法向量
-        self.normal = self.gap_x.copy()
-
     def _get_gap_corners(self):
         """计算缝隙的8个角点（考虑厚度方向）"""
         # 正面（x正方向）4个角点
         front = np.array([
             self.center + self.gap_y * (-self.gap_half_length) + self.gap_z * (-self.gap_half_height) + self.gap_x * (
                 self.gap_half_thickness),
-            self.center + self.gap_y * (self.gap_half_length) + self.gap_z * (-self.gap_half_height) + self.gap_x * (
+            self.center + self.gap_y * self.gap_half_length + self.gap_z * (-self.gap_half_height) + self.gap_x * (
                 self.gap_half_thickness),
-            self.center + self.gap_y * (self.gap_half_length) + self.gap_z * (self.gap_half_height) + self.gap_x * (
+            self.center + self.gap_y * self.gap_half_length + self.gap_z * self.gap_half_height + self.gap_x * (
                 self.gap_half_thickness),
-            self.center + self.gap_y * (-self.gap_half_length) + self.gap_z * (self.gap_half_height) + self.gap_x * (
+            self.center + self.gap_y * (-self.gap_half_length) + self.gap_z * self.gap_half_height + self.gap_x * (
                 self.gap_half_thickness),
         ], dtype=np.float64)
 
@@ -79,11 +77,11 @@ class NarrowGap:
         back = np.array([
             self.center + self.gap_y * (-self.gap_half_length) + self.gap_z * (-self.gap_half_height) - self.gap_x * (
                 self.gap_half_thickness),
-            self.center + self.gap_y * (self.gap_half_length) + self.gap_z * (-self.gap_half_height) - self.gap_x * (
+            self.center + self.gap_y * self.gap_half_length + self.gap_z * (-self.gap_half_height) - self.gap_x * (
                 self.gap_half_thickness),
-            self.center + self.gap_y * (self.gap_half_length) + self.gap_z * (self.gap_half_height) - self.gap_x * (
+            self.center + self.gap_y * self.gap_half_length + self.gap_z * self.gap_half_height - self.gap_x * (
                 self.gap_half_thickness),
-            self.center + self.gap_y * (-self.gap_half_length) + self.gap_z * (self.gap_half_height) - self.gap_x * (
+            self.center + self.gap_y * (-self.gap_half_length) + self.gap_z * self.gap_half_height - self.gap_x * (
                 self.gap_half_thickness),
         ], dtype=np.float64)
 

@@ -1,4 +1,6 @@
 import numpy as np
+
+
 class ReplayMemory:
     def __init__(self, memo_capacity, state_dim, action_dim):
         self.memo_size = memo_capacity
@@ -29,7 +31,3 @@ class ReplayMemory:
         batch_done = self.done_memo[batch]
 
         return batch_state, batch_action, batch_reward, batch_next_state, batch_done
-
-
-
-

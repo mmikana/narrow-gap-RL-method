@@ -3,7 +3,8 @@ from scipy.spatial.transform import Rotation
 
 
 class QuadrotorDynamics:
-    """四旋翼无人机动力学模型
+    """
+    四旋翼无人机动力学模型
 
     实现了论文中的四旋翼物理模型，包括：
     - 电机推力计算
@@ -18,8 +19,8 @@ class QuadrotorDynamics:
         self.position = np.array([0.0, 10, 0.0], dtype=np.float64)
         self.orientation = np.zeros(3, dtype=np.float64)
         self.orientation = np.radians(self.orientation)  # [roll,pitch,yaw] 角度,[0,2Π],[-0.5Π,0.5Π][0,2Π]
-        self.velocity = np.zeros(3, dtype=np.float64)  # [vX,vY,vZ] 线速度 (m/s),Body Frame
-        self.angular_velocity = np.zeros(3, dtype=np.float64)  # [ωX,ωY,ωZ] 角速度 (rad/s),Body Frame
+        self.velocity = np.zeros(3, dtype=np.float64)  # [vX,vY,vZ] 线速度 (m/s)
+        self.angular_velocity = np.zeros(3, dtype=np.float64)  # [ωX,ωY,ωZ] 角速度 (rad/s)
 
         # 朝向
         self.local_x = np.array([1, 0, 0])
@@ -116,6 +117,14 @@ class QuadrotorDynamics:
             current_angular_velocity
         )
         self.orientation = (self.orientation + np.pi) % (2 * np.pi) - np.pi
+        # 角度范围约束：pitch限制在±π/2，其他角保持±π
+        roll, pitch, yaw = self.orientation
+        # 限制pitch在[-π/2, π/2]
+        pitch_clamped = np.clip(pitch, -np.pi / 2, np.pi / 2)
+        # 其他角保持原有归一化逻辑
+        roll_clamped = (roll + np.pi) % (2 * np.pi) - np.pi
+        yaw_clamped = (yaw + np.pi) % (2 * np.pi) - np.pi
+        self.orientation = np.array([roll_clamped, pitch_clamped, yaw_clamped])
 
         # RK4积分 - 速度
         self.velocity = self._rk4_integrate(
@@ -270,12 +279,12 @@ class QuadrotorDynamics:
         aero_moment_yaw = -d_psi_effective * omega[2]
 
         angular_acc = np.array([
-            (tau_phi - (self.inertia[1, 1] - self.inertia[2, 2]) * omega[1] * omega[2] + aero_moment_roll) / self.inertia[
-                0, 0],
+            (tau_phi - (self.inertia[1, 1] - self.inertia[2, 2]) * omega[1] * omega[2] + aero_moment_roll) /
+            self.inertia[0, 0],
             (tau_theta - (self.inertia[2, 2] - self.inertia[0, 0]) * omega[0] * omega[2] + aero_moment_pitch) /
             self.inertia[1, 1],
-            (tau_psi - (self.inertia[0, 0] - self.inertia[1, 1]) * omega[0] * omega[1] + aero_moment_yaw) / self.inertia[
-                2, 2]
+            (tau_psi - (self.inertia[0, 0] - self.inertia[1, 1]) * omega[0] * omega[1] + aero_moment_yaw) /
+            self.inertia[2, 2]
         ])
 
         return angular_acc, total_thrust

@@ -1,0 +1,370 @@
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+
+from QuadrotorDynamics import QuadrotorDynamics
+from NarrowGap import NarrowGap
+from collision_detector import CollisionDetector
+
+
+class QuadFlyEnv(gym.Env):
+    """无人机定点控制环境（无地面/边界版本）"""
+
+    def __init__(self, goal_position=np.array([3.0, 3.0, 3.0])):
+        # 无人机动力学初始化
+        self.uav = QuadrotorDynamics()
+
+        # 动作空间：归一化的控制指令[thrust, roll, pitch, yaw]，范围[-1, 1]
+        self.action_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
+
+        # 观测空间：位置(3) + 速度(3) + 姿态(3) + 角速度(3) + 目标位置(3)
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(15,),  # 包含目标位置信息
+            dtype=np.float32
+        )
+
+        # 目标位置设置
+        self.goal_position = np.array(goal_position, dtype=np.float64)
+        self.initial_position = np.array([0, 0, 0], dtype=np.float64)  # 默认初始位置
+
+        # 训练参数
+        self.max_steps = 200  # 单轮最大步数
+        self.current_step = 0
+
+        # 奖励配置（无边界相关惩罚）
+        self.reward_config = {
+            'goal_reward': 100.0,  # 到达目标奖励
+            'distance_weight': 50.0,  # 距离权重
+            'ideal_velocity': 1.0,
+            'velocity_weight': 0,  # 速度权重
+            'orientation_weight': 0,  # 姿态权重
+            'angular_velocity_weight': 0,  # 角速度权重
+            'goal_tolerance': 0.2  # 到达目标的位置容差(m)
+        }
+
+        # 初始化奖励计算器
+        self.reward_calculator = self.RewardCalculator(self.reward_config)
+
+        # 数据记录
+        self.trajectory_history = []
+        self.reward_history = []
+
+    class RewardCalculator:
+        """奖励计算封装类，负责处理QuadFlyEnv的奖励计算逻辑"""
+
+        def __init__(self, config):
+            # 从配置中初始化奖励参数
+            self.goal_reward = config.get('goal_reward', 100.0)
+            self.distance_weight = config.get('distance_weight', 1.0)
+            self.goal_tolerance = config.get('goal_tolerance', 0.2)
+
+        def calculate_reward(self, uav_position, goal_position, goal_achieved):
+            """计算单步奖励"""
+            reward_step = 0.0
+
+            # 到达目标奖励
+            if goal_achieved:
+                reward_step += self.goal_reward
+
+            # 距离惩罚（基于到目标的距离）
+            distance = np.linalg.norm(uav_position - goal_position)
+            reward_distance = self.distance_weight * np.exp(-distance)
+            reward_step += reward_distance
+
+            return reward_step
+
+    def set_goal(self, goal_position):
+        """设置新的目标位置"""
+        self.goal_position = np.array(goal_position, dtype=np.float64)
+
+    def set_initial_position(self, initial_position):
+        """设置初始位置"""
+        self.initial_position = np.array(initial_position, dtype=np.float64)
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+
+        # 重置无人机状态
+        self.uav.reset(
+            position=self.initial_position.copy(),
+            orientation=[0, 0, 0]  # 初始姿态水平
+        )
+
+        # 应用状态随机化增加训练鲁棒性
+        self.apply_randomization()
+
+        self.current_step = 0
+        # 重置历史记录
+        self.trajectory_history = []
+        self.reward_history = []
+
+        return self.get_obs(), {}
+
+    def get_obs(self):
+        """获取观测：无人机状态 + 目标位置"""
+        uav_obs = self.uav.get_obs()  # 12维基础观测
+        return np.concatenate([uav_obs, self.goal_position]).astype(np.float32)
+
+    def step(self, action):
+        self.current_step += 1
+
+        # 执行动作：将归一化动作转换为电机转速并更新动力学
+        motor_speeds = self.uav.normalized_action_to_motor_speeds(action)
+        self.uav.update(motor_speeds)
+
+        # 检查终止条件（仅判断是否到达目标或步数耗尽）
+        goal_achieved = self.check_goal_achieved()
+        terminated = goal_achieved
+        truncated = self.current_step >= self.max_steps
+
+        # 计算奖励（使用封装的奖励计算器）
+        reward = self.reward_calculator.calculate_reward(
+            self.uav.position,
+            self.goal_position,
+            goal_achieved
+        )
+
+        # 记录数据
+        self.trajectory_history.append(self.uav.position.copy())
+        self.reward_history.append(reward)
+
+        # 额外信息
+        info = {
+            "goal_achieved": goal_achieved,
+            "distance_to_goal": np.linalg.norm(self.uav.position - self.goal_position),
+            "steps": self.current_step
+        }
+
+        return self.get_obs(), reward, terminated, truncated, info
+
+    def check_goal_achieved(self):
+        """检查是否到达目标位置"""
+        distance = np.linalg.norm(self.uav.position - self.goal_position)
+        return distance < self.reward_config['goal_tolerance']
+
+    def apply_randomization(self):
+        """应用状态随机化，增加训练泛化性"""
+        # 位置微小扰动
+        self.uav.position += np.random.normal(0, 0.05, 3)
+        # 姿态微小扰动
+        self.uav.orientation += np.random.normal(0, 0.002, 3)
+        # 初始速度微小扰动
+        self.uav.velocity += np.random.normal(0, 0.1, 3)
+        # 物理参数微小扰动
+        self.uav.mass *= (1 + np.random.normal(0, 0.05))
+        self.uav.k_d *= (1 + np.random.normal(0, 0.05))
+
+    def get_episode_data(self):
+        """获取 episode 数据用于分析"""
+        return {
+            'trajectory': np.array(self.trajectory_history),
+            'rewards': np.array(self.reward_history),
+            'goal_position': self.goal_position,
+            'initial_position': self.initial_position
+        }
+
+    def close(self):
+        pass
+
+
+class Quad2NGEnv(gym.Env):
+    def __init__(self):
+        # UAV动力学初始化
+        self.uav = QuadrotorDynamics()
+        # 动作：归一化的转速[u1,u2,u3,u4]
+        self.action_space = spaces.Box(low=-1, high=1, shape=(4,))
+        # 状态：位置(3) + 速度(3) + 姿态(3) + 角速度(3)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12,))
+        # 碰撞检测与缝隙环境初始化
+        self.detector = CollisionDetector()
+        self.NarrowGap = NarrowGap()
+        self.goal_position = np.array([0.25, 0, 0])
+
+        self.gamma = 0.99
+        self.max_steps = 500
+        self.current_step = 0
+
+        # 奖励配置
+        self.reward_config = {
+            'reward_achievegoal': 0,
+            'collision_penalty': -40,
+            'e_0_p': 1.2,
+            'orientation_weight': 0,
+            'position_weight': 1,
+            'speed_weight': 0,
+            'ideal_speed': 1.5
+        }
+        # 初始化奖励计算器
+        self.reward_calculator = self.RewardCalculator(self.reward_config)
+
+        # 课程学习难度设置
+        self.current_difficulty = 0
+        self.difficulty_levels = [
+            {'gap_size': (1.0, 0.38), 'tilt': 0},
+            {'gap_size': (0.8, 0.36), 'tilt': 10},
+            {'gap_size': (0.7, 0.34), 'tilt': 20},
+        ]
+
+        # 数据记录
+        self.trajectory_history = []
+        self.orientation_history = []
+        self.velocity_history = []
+        self.reward_history = []
+
+    class RewardCalculator:
+        def __init__(self, config):
+            # 从配置中初始化奖励相关参数
+            self.reward_achievegoal = config.get('reward_achievegoal', 0)
+            self.collision_penalty = config.get('collision_penalty', -40)
+            self.e_0_p = config.get('e_0_p', 1.2)
+            self.orientation_weight = config.get('orientation_weight', 0)
+            self.position_weight = config.get('position_weight', 1)
+            self.speed_weight = config.get('speed_weight', 0)
+            self.ideal_speed = config.get('ideal_speed', 1.5)
+
+        def calculate_reward(self, uav, narrow_gap, goal_position, collision):
+            """计算单步奖励"""
+            reward_step = 0
+
+            # 碰撞惩罚
+            if collision:
+                reward_step += self.collision_penalty
+
+            # 到达目标奖励
+            e_t_p = np.linalg.norm(uav.position - goal_position)
+            goal_distance = 0.5 * narrow_gap.gap_thickness + 0.5 * uav.size[0]
+            if e_t_p < goal_distance:
+                reward_step += self.reward_achievegoal
+
+            # 位置奖励
+            reward_distance = self.position_weight * np.exp(-e_t_p)
+            reward_step += reward_distance
+
+            # 姿态奖励
+            h_t_p = np.maximum(1 - (e_t_p / self.e_0_p), 0)
+            e_t_psi = np.arccos(np.dot(uav.inertial_x, narrow_gap.gap_x)
+                                / (np.linalg.norm(uav.inertial_x) * np.linalg.norm(narrow_gap.gap_x) + 1e-10))
+            e_t_phi = np.arccos(np.dot(uav.inertial_y, narrow_gap.gap_y)
+                                / (np.linalg.norm(uav.inertial_y) * np.linalg.norm(narrow_gap.gap_y) + 1e-10))
+            e_t_theta = np.arccos(np.dot(uav.inertial_z, narrow_gap.gap_z)
+                                / (np.linalg.norm(uav.inertial_z) * np.linalg.norm(narrow_gap.gap_z) + 1e-10))
+            e_t_ori_2 = np.square(e_t_phi) + np.square(e_t_theta) + np.square(e_t_psi)
+            reward_orientation = -self.orientation_weight * np.square(h_t_p) * (1 - np.exp(-e_t_ori_2))
+            reward_step += reward_orientation
+
+            # 速度奖励
+            e_speed = abs(np.linalg.norm(uav.velocity) - self.ideal_speed)
+            speed_reward = -self.speed_weight * e_speed / self.ideal_speed
+            reward_step += speed_reward
+
+            return reward_step
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.uav.reset(position=[0, 0, 1], orientation=[0, 0, 0])
+        self.apply_randomization()
+        self.current_step = 0
+
+        self.trajectory_history = []
+        self.orientation_history = []
+        self.velocity_history = []
+        self.reward_history = []
+
+        return self.uav.get_obs(), {}
+
+    def step(self, action):
+        self.current_step += 1
+        # 动作执行
+        motor_speeds = self.uav.normalized_action_to_motor_speeds(action)
+        self.uav.update(motor_speeds)
+
+        # 检查碰撞状态
+        collision = self.detector.efficient_collision_check(self.uav, self.NarrowGap)
+
+        # 计算奖励
+        reward_step = self.reward_calculator.calculate_reward(self.uav, self.NarrowGap, self.goal_position, collision)
+
+        # 终止条件
+        terminated = (
+                collision or
+                self.achieve_goal() or
+                self.current_step >= self.max_steps
+        )
+        truncated = False
+        info = {
+            "collision": collision,
+            "goal_achieved": self.achieve_goal(),
+            "distance_to_goal": np.linalg.norm(self.uav.position - self.goal_position),
+            "steps": self.current_step
+        }
+
+        # 记录数据
+        self.trajectory_history.append(self.uav.position.copy())
+        self.orientation_history.append(self.uav.orientation.copy())
+        self.velocity_history.append(self.uav.velocity.copy())
+        self.reward_history.append(reward_step)
+
+        return self.uav.get_obs(), reward_step, terminated, truncated, info
+
+    def apply_randomization(self):
+        """应用环境随机化"""
+        # 位置和姿态随机化
+        self.uav.position += np.random.normal(0, 0.002, 3)
+        self.uav.orientation += np.random.normal(0, 0.01, 3)
+        self.uav.velocity += np.random.normal(0, 0.05, 3)
+        self.uav.angular_velocity += np.random.normal(0, 0.05, 3)
+
+        # 质量随机化
+        self.uav.mass *= (1 + np.random.normal(0, 0.1))
+
+    def increase_difficulty(self):
+        """增加环境难度"""
+        if self.current_difficulty < len(self.difficulty_levels) - 1:
+            self.current_difficulty += 1
+            level = self.difficulty_levels[self.current_difficulty]
+            self.NarrowGap = NarrowGap(
+                gap_length=level['gap_size'][0],
+                gap_height=level['gap_size'][1],
+                tilt=level['tilt']
+            )
+
+    def enter_gap(self):
+        """判断 UAV 中心是否进入 GAP 的 3D 包围盒"""
+        # 获取缝隙的四个角点
+        gap_corners = self.NarrowGap.get_gap_corners()
+
+        # 计算缝隙的边界
+        gap_min = np.min(gap_corners, axis=0)
+        gap_max = np.max(gap_corners, axis=0)
+
+        # 检查无人机中心是否在缝隙边界内
+        return np.all(gap_min <= self.uav.position) and np.all(self.uav.position <= gap_max)
+
+    def achieve_goal(self):
+        # 计算无人机到缝隙平面的距离（沿法向量方向）
+        dist_to_gap = np.linalg.norm(self.uav.position - self.goal_position)
+
+        # 判断是否到达达目标区域
+        goal_distance = 0.5 * self.NarrowGap.gap_thickness + 0.5 * self.uav.size[0]
+        if dist_to_gap < goal_distance:
+            return True
+        return False
+
+    def close(self):
+        pass
+
+    def get_episode_data(self):
+        """获取整个episode的数据"""
+        # 确保所有数组长度一致
+        min_length = min(len(self.trajectory_history),
+                         len(self.orientation_history),
+                         len(self.velocity_history))
+
+        return {
+            'trajectory': np.array(self.trajectory_history[:min_length]),
+            'orientations': np.array(self.orientation_history[:min_length]),
+            'velocities': np.array(self.velocity_history[:min_length]),
+            'rewards': np.array(self.reward_history[:min_length])
+        }
