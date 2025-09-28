@@ -8,19 +8,14 @@ from collision_detector import CollisionDetector
 
 
 class QuadFlyEnv(gym.Env):
-    """无人机定点控制环境（无地面/边界版本）"""
-
     def __init__(self, goal_position=np.array([3.0, 3.0, 3.0])):
-        # 无人机动力学初始化
         self.uav = QuadrotorDynamics()
-
         # 动作空间：归一化的控制指令[thrust, roll, pitch, yaw]，范围[-1, 1]
         self.action_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
-
         # 观测空间：位置(3) + 速度(3) + 姿态(3) + 角速度(3) + 目标位置(3)
         self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
+            low=-1,
+            high=1,
             shape=(15,),  # 包含目标位置信息
             dtype=np.float32
         )
@@ -35,10 +30,10 @@ class QuadFlyEnv(gym.Env):
 
         # 奖励配置（无边界相关惩罚）
         self.reward_config = {
-            'goal_reward': 100.0,  # 到达目标奖励
-            'distance_weight': 50.0,  # 距离权重
-            'ideal_velocity': 1.0,
-            'velocity_weight': 0,  # 速度权重
+            'goal_reward': 1000.0,  # 到达目标奖励
+            'distance_weight': 1.0,  # 距离权重
+            'ideal_velocity': 3.0,
+            'velocity_weight': 1.0,  # 速度权重
             'orientation_weight': 0,  # 姿态权重
             'angular_velocity_weight': 0,  # 角速度权重
             'goal_tolerance': 0.2  # 到达目标的位置容差(m)
@@ -52,26 +47,29 @@ class QuadFlyEnv(gym.Env):
         self.reward_history = []
 
     class RewardCalculator:
-        """奖励计算封装类，负责处理QuadFlyEnv的奖励计算逻辑"""
-
         def __init__(self, config):
             # 从配置中初始化奖励参数
             self.goal_reward = config.get('goal_reward', 100.0)
             self.distance_weight = config.get('distance_weight', 1.0)
+            self.ideal_velocity = config.get('ideal_velocity', 3.0)
+            self.velocity_weight = config.get('velocity_weight', 0.0)
             self.goal_tolerance = config.get('goal_tolerance', 0.2)
 
-        def calculate_reward(self, uav_position, goal_position, goal_achieved):
-            """计算单步奖励"""
+        def calculate_reward(self, uav, goal_position, goal_achieved):
             reward_step = 0.0
-
             # 到达目标奖励
             if goal_achieved:
                 reward_step += self.goal_reward
 
             # 距离惩罚（基于到目标的距离）
-            distance = np.linalg.norm(uav_position - goal_position)
+            distance = abs(np.linalg.norm(uav.position - goal_position))
             reward_distance = self.distance_weight * np.exp(-distance)
             reward_step += reward_distance
+
+            # 速度惩罚
+            e_vel = abs(np.linalg.norm(uav.velocity) - self.ideal_velocity)
+            reward_vel = self.velocity_weight * np.exp(-e_vel)
+            reward_step += reward_vel
 
             return reward_step
 
@@ -103,14 +101,41 @@ class QuadFlyEnv(gym.Env):
         return self.get_obs(), {}
 
     def get_obs(self):
-        """获取观测：无人机状态 + 目标位置"""
-        uav_obs = self.uav.get_obs()  # 12维基础观测
-        return np.concatenate([uav_obs, self.goal_position]).astype(np.float32)
+        '''
+        获得归一化的状态
+        '''
+        uav_pos = np.copy(self.uav.position)
+        uav_vel = np.copy(self.uav.velocity)
+        uav_ori = np.copy(self.uav.orientation)
+        uav_ang_vel = np.copy(self.uav.angular_velocity)
+
+        relative_pos = Vector3(self.goal_position - np.copy(self.uav.position))
+        relative_pos = relative_pos.rev_rotate_zyx_self(uav_ori[0], uav_ori[1], uav_ori[2]).vec
+        relative_pos /= 20.
+
+        uav_pos /= 20.
+
+        uav_vel /= 6  # 2* ideal_vel
+
+        uav_ori[0] /= np.pi
+        uav_ori[1] /= (0.5 * np.pi)
+        uav_ori[2] /= np.pi
+
+        uav_ang_vel[0] /= (32 * np.pi)
+        uav_ang_vel[1] /= (32 * np.pi)
+        uav_ang_vel[2] /= (2 * np.pi)
+
+        normalized_obs = np.concatenate([
+            relative_pos,
+            uav_pos,
+            uav_vel,
+            uav_ori,
+            uav_ang_vel
+        ]).astype(np.float32)
+        return normalized_obs
 
     def step(self, action):
         self.current_step += 1
-
-        # 执行动作：将归一化动作转换为电机转速并更新动力学
         motor_speeds = self.uav.normalized_action_to_motor_speeds(action)
         self.uav.update(motor_speeds)
 
@@ -119,9 +144,9 @@ class QuadFlyEnv(gym.Env):
         terminated = goal_achieved
         truncated = self.current_step >= self.max_steps
 
-        # 计算奖励（使用封装的奖励计算器）
+        # 计算奖励
         reward = self.reward_calculator.calculate_reward(
-            self.uav.position,
+            self.uav,
             self.goal_position,
             goal_achieved
         )
@@ -276,16 +301,12 @@ class Quad2NGEnv(gym.Env):
 
     def step(self, action):
         self.current_step += 1
-        # 动作执行
-        motor_speeds = self.uav.normalized_action_to_motor_speeds(action)
+        motor_speeds = self.uav.normalized_action_to_motor_speeds(action)  #  RL算法输出升力和转矩，换算成转速
         self.uav.update(motor_speeds)
-
-        # 检查碰撞状态
+        #  检查碰撞
         collision = self.detector.efficient_collision_check(self.uav, self.NarrowGap)
-
         # 计算奖励
         reward_step = self.reward_calculator.calculate_reward(self.uav, self.NarrowGap, self.goal_position, collision)
-
         # 终止条件
         terminated = (
                 collision or

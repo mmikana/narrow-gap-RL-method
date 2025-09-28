@@ -24,7 +24,7 @@ agent:
 
 # 训练配置
 training:
-  episode_num: 20000
+  episode_num: 10000
   step_num: 200
   visualize_interval: 10000
   save_episode_plots: True

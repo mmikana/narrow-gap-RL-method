@@ -86,6 +86,18 @@ class ActorNetwork(nn.Module):
 
         return mu, sigma
 
+    def get_action(self, state):
+        mu, sigma = self.forward(state)
+        probability = Normal(mu, sigma)
+        action = probability.sample()
+        tanh_action = torch.tanh(action)  # 使用确定性策略进行推理
+        scaled_action = tanh_action * self.max_action
+        return scaled_action
+
+        # mu, sigma = self.forward(state)
+        # actuion = torch.tanh(mu)
+        # return actuion
+
     def sample_normal(self, state, reparameterize=True):
         mu, sigma = self.forward(state)
         probability = Normal(mu, sigma)
@@ -146,8 +158,7 @@ class SACAgent:
         state = torch.tensor(state, dtype=torch.float).to(device).unsqueeze(0)
 
         with torch.no_grad():
-            mu, sigma = self.actor(state)
-            action = torch.tanh(mu)  # 使用确定性策略进行推理
+            action = self.actor.get_action(state)
 
             if add_noise:
                 # 添加探索噪声
