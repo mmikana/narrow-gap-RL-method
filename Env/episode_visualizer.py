@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
 from matplotlib.colors import Normalize
 from matplotlib.gridspec import GridSpec
-
+import os
+import json
 
 class EpisodeVisualizer:
     def __init__(self):
@@ -14,17 +15,68 @@ class EpisodeVisualizer:
 
     def setup_layout(self):
         """设置图表布局 - 二行三列布局"""
-        gs = GridSpec(2, 3, figure=self.fig, height_ratios=[4, 5])
+        gs = GridSpec(3, 3, figure=self.fig, height_ratios=[4, 5, 4])  # 增加一行用于奖励图
         self.ax_3d = self.fig.add_subplot(gs[0, 0], projection='3d')
         self.ax_position = self.fig.add_subplot(gs[0, 1])
         self.ax_velocity = self.fig.add_subplot(gs[0, 2])
         self.ax_orientation = self.fig.add_subplot(gs[1, :])
+        self.ax_reward = self.fig.add_subplot(gs[2, :])
 
         # 设置标题
         self.ax_3d.set_title('3D Flight Trajectory', fontsize=12, fontweight='bold')
-        self.ax_position.set_title('Position vs Time', fontsize=12, fontweight='bold')
-        self.ax_orientation.set_title('Orientation (Euler Angles) vs Time', fontsize=12, fontweight='bold')
-        self.ax_velocity.set_title('Velocity vs Time', fontsize=12, fontweight='bold')
+        self.ax_position.set_title('Position vs step', fontsize=12, fontweight='bold')
+        self.ax_orientation.set_title('Orientation vs step', fontsize=12, fontweight='bold')
+        self.ax_velocity.set_title('Velocity vs step', fontsize=12, fontweight='bold')
+        self.ax_reward.set_title('Reward vs step', fontsize=12, fontweight='bold')
+
+    def draw_fly_data(self, data_filepath, save_plot_dir=None, step_interval=None):
+        """
+        核心新增方法：读取本地飞行数据文件，生成可视化并保存图表
+        参数说明：
+            data_filepath: 本地飞行数据JSON文件路径（如"fly_data_20240520_153000/episode1_reward123.45_goal_achievedTrue.json"）
+            save_plot_dir: 图表保存目录（默认与数据文件同目录）
+            step_interval: 姿态箭头绘制间隔（可选，默认自动计算）
+        返回：
+            plot_filepath: 图表保存路径
+        """
+        # 1. 验证数据文件是否存在
+        if not os.path.exists(data_filepath):
+            raise FileNotFoundError(f"飞行数据文件不存在：{data_filepath}")
+
+        # 2. 读取JSON数据并转换为numpy数组（适配visualize_episode要求的格式）
+        with open(data_filepath, 'r') as f:
+            raw_data = json.load(f)
+
+        # 3. 数据格式转换：列表 → numpy数组（确保维度和类型正确）
+        visualized_data = self._convert_raw_data(raw_data)
+
+        # 4. 处理图表保存目录（默认与数据文件同目录，避免手动指定）
+        if save_plot_dir is None:
+            # 提取数据文件所在目录（如从"a/b/c.json"中提取"a/b"）
+            save_plot_dir = os.path.dirname(data_filepath)
+        os.makedirs(save_plot_dir, exist_ok=True)  # 确保目录存在
+
+        # 5. 生成图表文件名（基于数据文件名，替换后缀为.png）
+        data_filename = os.path.basename(data_filepath)
+        plot_filename = os.path.splitext(data_filename)[0] + ".png"
+        plot_filepath = os.path.join(save_plot_dir, plot_filename)
+
+        # 6. 传递参数调用原有可视化逻辑
+        if step_interval is not None:
+            visualized_data['step_interval'] = step_interval
+
+        self.visualize_episode(**visualized_data)
+
+        # 7. 保存图表到本地
+        self.save_plot(plot_filepath)
+
+        # 8. 清理当前画布（避免多轮可视化时图像重叠）
+        plt.close(self.fig)
+        self.fig = plt.figure(figsize=(20, 20), constrained_layout=True)
+        self.setup_layout()
+
+        print(f"完整流程完成：数据文件 → 可视化图表\n数据路径：{data_filepath}\n图表路径：{plot_filepath}")
+        return plot_filepath
 
     def visualize_episode(self, **kwargs):
         """
@@ -48,6 +100,7 @@ class EpisodeVisualizer:
         trajectory = kwargs['trajectory']
         orientations = kwargs['orientations']
         velocities = kwargs['velocities']
+        rewards = kwargs['rewards']
         goal_position = kwargs['goal_position']
         narrow_gap = kwargs.get('narrow_gap', None)  # 可选参数，无窄缝环境可为None
 
@@ -75,6 +128,7 @@ class EpisodeVisualizer:
             time_steps, orientations_deg, narrow_gap, has_narrow_gap
         )
         self._plot_velocity_vs_time(time_steps, velocities)
+        self._plot_reward_vs_time(time_steps, rewards)
 
         # 添加时间颜色条
         cbar = plt.colorbar(
@@ -246,8 +300,63 @@ class EpisodeVisualizer:
         self.ax_velocity.legend(loc='upper right', fontsize=8)
         self.ax_velocity.grid(True, alpha=0.3)
 
+    def _plot_reward_vs_time(self, time_steps, rewards):
+        """绘制奖励随时间变化曲线"""
+        # 绘制每步奖励曲线
+        self.ax_reward.plot(time_steps, rewards, 'purple', linewidth=2, label='Step Reward')
+
+        # 计算并绘制累积奖励曲线
+        cumulative_rewards = np.cumsum(rewards)
+        self.ax_reward.plot(time_steps, cumulative_rewards, 'orange', linestyle='--',
+                            linewidth=2, label='Cumulative Reward')
+
+        # 绘制奖励平均值参考线
+        mean_reward = np.mean(rewards)
+        self.ax_reward.axhline(y=mean_reward, color='gray', linestyle=':',
+                               alpha=0.7, label=f'Mean Reward: {mean_reward:.2f}')
+
+        # 设置坐标轴属性
+        self.ax_reward.set_xlabel('Time Step')
+        self.ax_reward.set_ylabel('Reward Value')
+        self.ax_reward.legend(loc='upper right', fontsize=8)
+        self.ax_reward.grid(True, alpha=0.3)
+
+    def _convert_raw_data(self, raw_data):
+        """
+        辅助方法：将JSON读取的原始列表数据转换为visualize_episode所需的numpy数组格式
+        处理逻辑：确保轨迹、姿态、速度等核心数据为(N,3)数组，奖励为(N,)数组
+        """
+        # 核心数据转换（必选字段）
+        converted = {
+            # 轨迹：列表 → (N,3) numpy数组
+            'trajectory': np.array(raw_data['trajectory'], dtype=np.float64),
+            # 姿态：列表 → (N,3) numpy数组（原始为弧度，适配后续角度转换）
+            'orientations': np.array(raw_data['orientations'], dtype=np.float64),
+            # 速度：列表 → (N,3) numpy数组
+            'velocities': np.array(raw_data['velocities'], dtype=np.float64),
+            # 奖励：列表 → (N,) numpy数组（兼容单步奖励和累积奖励绘制）
+            'rewards': np.array(raw_data['rewards'], dtype=np.float64),
+            # 目标位置：列表 → (3,) numpy数组
+            'goal_position': np.array(raw_data['goal_position'], dtype=np.float64)
+        }
+
+        # 调试信息：打印数组形状以确认维度
+        print(f"轨迹数据形状: {converted['trajectory'].shape}")
+        print(f"姿态数据形状: {converted['orientations'].shape}")
+        print(f"速度数据形状: {converted['velocities'].shape}")
+        print(f"奖励数据形状: {converted['rewards'].shape}")
+        print(f"目标位置形状: {converted['goal_position'].shape}")
+
+        # 验证核心数据维度（避免可视化时索引越界）
+        n_steps = len(converted['trajectory'])
+        assert len(converted['orientations']) == n_steps, "姿态数据与轨迹步数不匹配"
+        assert len(converted['velocities']) == n_steps, "速度数据与轨迹步数不匹配"
+        assert len(converted['rewards']) == n_steps, "奖励数据与轨迹步数不匹配"
+        assert converted['goal_position'].shape == (3,), "目标位置维度应为(3,)"
+
+        return converted
+
     def save_plot(self, filename, dpi=300):
-        """保存图表到文件"""
         plt.savefig(filename, dpi=dpi, bbox_inches='tight')
         print(f"图表已保存至: {filename}")
 

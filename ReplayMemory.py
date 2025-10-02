@@ -4,9 +4,14 @@ import numpy as np
 class ReplayMemory:
     def __init__(self, memo_capacity, state_dim, action_dim):
         self.memo_size = memo_capacity
-        self.state_memo = np.zeros((self.memo_size, state_dim))
-        self.next_state_memo = np.zeros((self.memo_size, state_dim))
-        self.action_memo = np.zeros((self.memo_size, action_dim))
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.reset()
+    
+    def reset(self):
+        self.state_memo = np.zeros((self.memo_size, self.state_dim))
+        self.next_state_memo = np.zeros((self.memo_size, self.state_dim))
+        self.action_memo = np.zeros((self.memo_size, self.action_dim))
         self.reward_memo = np.zeros(self.memo_size)
         self.done_memo = np.zeros(self.memo_size)
         self.memo_counter = 0
