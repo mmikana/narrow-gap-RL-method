@@ -10,277 +10,26 @@ from .collision_detector import CollisionDetector
 from .i3utils import Vector3
 
 
-class QuadFlyEnv(gym.Env):
-    """无人机定点控制环境（无地面/边界版本）"""
-
-    def __init__(self, goal_position=np.array([3.0, 3.0, 3.0]), visualize = True):
-        # 无人机动力学初始化
-        self.uav = QuadrotorDynamics()
-
-        # 动作空间：归一化的控制指令[thrust, roll, pitch, yaw]，范围[-1, 1]
-        self.action_space = spaces.Box(low=-1, high=1, shape=(4,), dtype=np.float32)
-
-        # 观测空间：位置(3) + 速度(3) + 姿态(3) + 角速度(3) + 目标位置(3)
-        self.observation_space = spaces.Box(
-            low=-1,
-            high=1,
-            shape=(15,),  # 包含目标位置信息
-            dtype=np.float32
-        )
-
-        # 目标位置设置
-        self.goal_position = np.array(goal_position, dtype=np.float64)
-        self.initial_position = np.array([0, 0, 0], dtype=np.float64)  # 默认初始位置
-
-        # 训练参数
-        self.max_steps = 200  # 单轮最大步数
-        self.current_step = 0
-        self.current_episode = 0
-
-        # 奖励配置（无边界相关惩罚）
-        self.reward_config = {
-            'goal_reward': 100.0,  # 到达目标奖励
-            'distance_weight': 1.0,  # 距离权重
-            'ideal_velocity': 3.0,
-            'velocity_weight': 1.0,  # 速度权重
-            'orientation_weight': 0,  # 姿态权重
-            'angular_velocity_weight': 0,  # 角速度权重
-            'goal_tolerance': 0.2  # 到达目标的位置容差(m)
-        }
-
-        # 初始化奖励计算器
-        self.reward_calculator = self.RewardCalculator(self.reward_config)
-
-        # 数据记录
-        self.trajectory_history = []
-        self.orientation_history = []
-        self.velocity_history = []
-        self.reward_history = []
-
-
-    class RewardCalculator:
-        """奖励计算封装类，负责处理QuadFlyEnv的奖励计算逻辑"""
-
-        def __init__(self, config):
-            # 从配置中初始化奖励参数
-            self.goal_reward = config.get('goal_reward', 100.0)
-            self.distance_weight = config.get('distance_weight', 1.0)
-            self.ideal_velocity = config.get('ideal_velocity', 3.0)
-            self.velocity_weight = config.get('velocity_weight', 0.0)
-            self.goal_tolerance = config.get('goal_tolerance', 0.2)
-
-        def calculate_reward(self, uav, goal_position, goal_achieved):
-            """计算单步奖励"""
-            reward_step = 0.0
-            # 到达目标奖励
-            if goal_achieved:
-                reward_step += self.goal_reward
-
-            # 距离惩罚（基于到目标的距离）
-            distance = abs(np.linalg.norm(uav.position - goal_position))
-            reward_distance = self.distance_weight * np.exp(-distance)
-            reward_step += reward_distance
-
-            # 速度惩罚
-            e_vel = abs(np.linalg.norm(uav.velocity) - self.ideal_velocity)
-            reward_vel = self.velocity_weight * np.exp(-e_vel)
-            reward_step += reward_vel
-
-            return reward_step
-
-    def set_goal(self, goal_position):
-        """设置新的目标位置"""
-        self.goal_position = np.array(goal_position, dtype=np.float64)
-
-    def set_initial_position(self, initial_position):
-        """设置初始位置"""
-        self.initial_position = np.array(initial_position, dtype=np.float64)
-
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        self.current_episode = 0
-        # 重置无人机状态
-        self.uav.reset(
-            position=self.initial_position.copy(),
-            orientation=[0, 0, 0]  # 初始姿态水平deg
-        )
-        self.goal_position = self.goal_position
-
-        # 应用状态随机化增加训练鲁棒性
-        # self.apply_randomization()
-
-        # 重置历史记录
-        self.trajectory_history = []
-        self.orientation_history = []
-        self.velocity_history = []
-        self.reward_history = []
-
-        return self.get_obs(), {}
-
-    def get_obs(self):
-        """获取观测：无人机状态 + 目标位置"""
-        uav_pos = np.copy(self.uav.position)
-        uav_vel = np.copy(self.uav.velocity)
-        uav_ori = np.copy(self.uav.orientation)
-        uav_ang_vel = np.copy(self.uav.angular_velocity)
-        
-        ########################### normalize ##################################
-        to_goal_pos = Vector3(self.goal_position - np.copy(self.uav.position))
-        to_goal_pos = to_goal_pos.rev_rotate_zyx_self(uav_ori[0], uav_ori[1], uav_ori[2]).vec
-        to_goal_pos /= 20.
-
-        uav_pos /= 20.
-
-        uav_vel /= 6  # 2* ideal_vel
-
-        uav_ori[0] /= np.pi
-        uav_ori[1] /= (0.5 * np.pi)
-        uav_ori[2] /= np.pi
-
-        uav_ang_vel[0] /= (32 * np.pi)
-        uav_ang_vel[1] /= (32 * np.pi)
-        uav_ang_vel[2] /= (2 * np.pi)
-        ########################################################################
-
-        normalized_obs = np.concatenate([
-            to_goal_pos,
-            uav_pos,
-            uav_vel,
-            uav_ori,
-            uav_ang_vel
-        ]).astype(np.float32)
-        return normalized_obs
-
-    def step(self, action):
-        self.current_step += 1
-
-        # 执行动作：将归一化动作转换为电机转速并更新动力学
-        motor_speeds = self.uav.normalized_action_to_motor_speeds(action)
-        self.uav.update(motor_speeds)
-
-        terminated = (
-                self.check_goal_achieved() or
-                self.current_step >= self.max_steps
-        )
-        truncated = False
-
-        # 计算奖励（使用封装的奖励计算器）
-        reward = self.reward_calculator.calculate_reward(
-            self.uav,
-            self.goal_position,
-            self.check_goal_achieved()
-        )
-
-        # 记录数据
-        self.trajectory_history.append(self.uav.position.copy())
-        self.orientation_history.append(self.uav.orientation.copy())
-        self.velocity_history.append(self.uav.velocity.copy())
-        self.reward_history.append(reward)
-
-        # 保存飞行数据
-        if terminated or truncated:
-
-            save_data_dir = os.path.join("QuadFlyEnv_data")
-            data_filepath = self.save_fly_data(save_data_dir)
-            self.save_fly_data()
-            from Env.episode_visualizer import EpisodeVisualizer
-            visualizer = EpisodeVisualizer()
-            save_plot_dir = os.path.join("QuadFlyEnv_plot")
-            visualizer.draw_fly_data(data_filepath=data_filepath, save_plot_dir=save_plot_dir)  # TODO
-
-        # 额外信息
-        info = {
-            "goal_achieved": self.check_goal_achieved(),
-            "distance_to_goal": np.linalg.norm(self.uav.position - self.goal_position),
-            "steps": self.current_step
-        }
-
-        return self.get_obs(), reward, terminated, truncated, info
-
-    def check_goal_achieved(self):
-        """检查是否到达目标位置"""
-        distance = np.linalg.norm(self.uav.position - self.goal_position)
-        return distance < self.reward_config['goal_tolerance']
-
-    def apply_randomization(self):
-        """应用状态随机化，增加训练泛化性"""
-        # 位置微小扰动
-        self.uav.position += np.random.normal(0, 0.05, 3)
-        # 姿态微小扰动
-        self.uav.orientation += np.random.normal(0, 0.002, 3)
-        # 初始速度微小扰动
-        self.uav.velocity += np.random.normal(0, 0.1, 3)
-        # 物理参数微小扰动
-        self.uav.mass *= (1 + np.random.normal(0, 0.05))
-        self.uav.k_d *= (1 + np.random.normal(0, 0.05))
-
-    '''
-    def get_episode_data(self):
-        """获取 episode 数据用于分析"""
-        return {
-            'trajectory': np.array(self.trajectory_history),
-            'rewards': np.array(self.reward_history),
-            'goal_position': self.goal_position,
-            'initial_position': self.initial_position
-        }
-
-    def visualize_step(self, visualizer, max_steps=None):
-        """实时可视化当前step的状态"""
-        episode_data = self.get_episode_data()
-        visualizer.update_dynamic(
-            trajectory=episode_data['trajectory'],
-            orientations=np.array([self.uav.orientation.copy() for _ in episode_data['trajectory']]),
-            velocities=np.array([self.uav.velocity.copy() for _ in episode_data['trajectory']]),
-            goal_position=self.goal_position,
-            max_steps=max_steps or self.max_steps
-        )
-    '''
-
-    def save_fly_data(self, save_dir=None):
-        # 如果未提供保存目录，则使用默认目录
-        if save_dir is None:
-            save_dir = f"QuadFlyEnv_data"
-        os.makedirs(save_dir, exist_ok=True)
-
-        filename = f"episode{self.current_episode}_reward{sum(self.reward_history):.2f}_goal_achieved{self.check_goal_achieved()}.json"
-        filepath = os.path.join(save_dir, filename)
-
-        episode_data = {
-            'trajectory': [arr.tolist() for arr in self.trajectory_history],
-            'orientations': [arr.tolist() for arr in self.orientation_history],
-            'velocities': [arr.tolist() for arr in self.velocity_history],
-            'rewards': self.reward_history,
-            'goal_position': self.goal_position.tolist(),
-            'total_steps': self.current_step
-        }
-
-        with open(filepath, 'w') as f:
-            json.dump(episode_data, f, indent=2)
-
-        return filepath
-
-    def close(self):
-        pass
-
-
 class Quad2NGEnv(gym.Env):
     def __init__(self):
-        # UAV动力学初始化
         self.uav = QuadrotorDynamics()
         # 动作：归一化的转速[u1,u2,u3,u4]
         self.action_space = spaces.Box(low=-1, high=1, shape=(4,))
-        # 状态：位置(3) + 速度(3) + 姿态(3) + 角速度(3)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(12,))
+        # 状态：位置(3) + 速度(3) + 姿态(3) + 角速度(3) + NG姿态(3)
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(15,))
         # 碰撞检测与缝隙环境初始化
         self.detector = CollisionDetector()
         self.NarrowGap = NarrowGap()
-        self.goal_position = np.array([0.25, 0, 0])
+
+        #  TODO  new variable
+        self.goal_tolerance = 0.1
 
         self.gamma = 0.99
+        #  TODO need debug
         self.max_steps = 500
         self.current_step = 0
 
-        # 奖励配置
+        #  TODO Reward need debug
         self.reward_config = {
             'reward_achievegoal': 0,
             'collision_penalty': -40,
@@ -293,12 +42,12 @@ class Quad2NGEnv(gym.Env):
         # 初始化奖励计算器
         self.reward_calculator = self.RewardCalculator(self.reward_config)
 
-        # 课程学习难度设置
+        # TODO
         self.current_difficulty = 0
         self.difficulty_levels = [
-            {'gap_size': (1.0, 0.38), 'tilt': 0},
-            {'gap_size': (0.8, 0.36), 'tilt': 10},
-            {'gap_size': (0.7, 0.34), 'tilt': 20},
+            {'gap_size': (3.0 * self.uav.size[0], 3.0 * self.uav.size[2]), 'tilt': 0},
+            {'gap_size': (2.5 * self.uav.size[0], 3.0 * self.uav.size[2]), 'tilt': 10},
+            {'gap_size': (2.0 * self.uav.size[0], 3.0 * self.uav.size[2]), 'tilt': 20},
         ]
 
         # 数据记录
@@ -306,17 +55,110 @@ class Quad2NGEnv(gym.Env):
         self.orientation_history = []
         self.velocity_history = []
         self.reward_history = []
+        self.current_episode = 0
+        self.plot = True
+
+        # curriculum learning
+        self.gap_scales = [3.0, 2.5, 2.0]  # L1, L2, L3
+        self.rotation_ranges = [
+            (-20, 20),  # R_A
+            (-40, 40),  # R_B
+            (-60, 60)  # R_C
+        ]
+        self.tilt_ranges = [
+            (-10, 10),  # T_A
+            (-20, 20),  # T_B
+            (-30, 30)  # T_C
+        ]
+        self.levels = self._generate_levels()  # TODO
+        self.current_level_idx = 0
+        self.success_counter = 0
+        self.unlock_threshold = 50
+        self._update_environment()  # TODO
+
+    def _generate_levels(self):
+        """生成27个关卡的配置列表（按阶段顺序排列）"""
+        levels = []
+        # 阶段1-3：L1（3.0倍缝隙）+ 所有旋转/倾斜组合
+        for rotation_idx in [0, 1, 2]:  # R_A, R_B, R_C 依次递进
+            for t_idx in [0, 1, 2]:  # T_A→T_B→T_C
+                levels.append({
+                    'gap_scale': self.gap_scales[0],
+                    'rotation_range': self.rotation_ranges[rotation_idx],
+                    'tilt_range': self.tilt_ranges[t_idx]
+                })
+
+        # 阶段4-6：L2（2.5倍缝隙）+ 所有旋转/倾斜组合
+        for rotation_idx in [0, 1, 2]:
+            for t_idx in [0, 1, 2]:
+                levels.append({
+                    'gap_scale': self.gap_scales[1],
+                    'rotation_range': self.rotation_ranges[rotation_idx],
+                    'tilt_range': self.tilt_ranges[t_idx]
+                })
+
+        # 阶段7-9：L3（2.0倍缝隙）+ 所有旋转/倾斜组合
+        for rotation_idx in [0, 1, 2]:
+            for t_idx in [0, 1, 2]:
+                levels.append({
+                    'gap_scale': self.gap_scales[2],
+                    'rotation_range': self.rotation_ranges[rotation_idx],
+                    'tilt_range': self.tilt_ranges[t_idx]
+                })
+        return levels
+
+    def _update_environment(self):
+        """根据当前关卡更新缝隙参数（随机采样角度）"""
+        if self.current_level_idx >= len(self.levels):
+            self.current_level_idx = len(self.levels) - 1  # 保持最高难度
+
+        level = self.levels[self.current_level_idx]
+        # 计算缝隙尺寸（基于无人机尺寸）
+        gap_length = level['gap_scale'] * self.uav.size[0]
+        gap_height = level['gap_scale'] * self.uav.size[2]
+
+        # 随机采样rotation和tilt角度（在当前关卡范围内）
+        rotation = np.random.uniform(
+            level['rotation_range'][0],
+            level['rotation_range'][1]
+        )
+        tilt = np.random.uniform(
+            level['tilt_range'][0],
+            level['tilt_range'][1]
+        )
+
+        # 更新缝隙
+        self.NarrowGap = NarrowGap(
+            gap_length=gap_length,
+            gap_height=gap_height,
+            rotation=rotation,  # 旋转角（度）
+            tilt=tilt  # 倾斜角（度）
+        )
+
+    def _check_level_unlock(self, goal_achieved):
+        """检查是否解锁下一关卡"""
+        if goal_achieved:
+            self.success_count += 1
+            # 达到解锁条件且未到最后一关
+            if (self.success_count >= self.unlock_threshold and
+                self.current_level_idx < len(self.levels) - 1):
+                self.current_level_idx += 1
+                self._update_environment()
+                self.success_count = 0  # 重置计数器
+                print(f"解锁新关卡 {self.current_level_idx + 1}/27 | 配置: {self.levels[self.current_level_idx]}")
+        else:
+            self.success_count = 0  # 失败则重置连续计数
 
     class RewardCalculator:
         def __init__(self, config):
             # 从配置中初始化奖励相关参数
-            self.reward_achievegoal = config.get('reward_achievegoal', 0)
-            self.collision_penalty = config.get('collision_penalty', -40)
+            self.reward_achievegoal = config.get('reward_achievegoal')
+            self.collision_penalty = config.get('collision_penalty')
             self.e_0_p = config.get('e_0_p', 1.2)
-            self.orientation_weight = config.get('orientation_weight', 0)
-            self.position_weight = config.get('position_weight', 1)
-            self.speed_weight = config.get('speed_weight', 0)
-            self.ideal_speed = config.get('ideal_speed', 1.5)
+            self.orientation_weight = config.get('orientation_weight')
+            self.position_weight = config.get('position_weight')
+            self.speed_weight = config.get('speed_weight')
+            self.ideal_speed = config.get('ideal_speed')
 
         def calculate_reward(self, uav, narrow_gap, goal_position, collision):
             """计算单步奖励"""
@@ -361,12 +203,49 @@ class Quad2NGEnv(gym.Env):
         self.apply_randomization()
         self.current_step = 0
 
+        self.apply_randomization()
+
         self.trajectory_history = []
         self.orientation_history = []
         self.velocity_history = []
         self.reward_history = []
 
-        return self.uav.get_obs(), {}
+        self._update_environment()
+        return self.get_obs(), {}
+
+    def get_obs(self):
+        uav_pos = np.copy(self.uav.position)
+        uav_vel = np.copy(self.uav.velocity)
+        uav_ori = np.copy(self.uav.orientation)
+        uav_ang_vel = np.copy(self.uav.angular_velocity)
+
+        to_goal_pos = Vector3(self.NarrowGap.center - np.copy(self.uav.position))
+        to_goal_pos = to_goal_pos.rev_rotate_zyx_self(uav_ori[0], uav_ori[1], uav_ori[2]).vec
+        pos_limit = 5 * to_goal_pos
+        to_goal_pos /= pos_limit
+        uav_vel /= 9  # 3 * ideal_vel
+
+        uav_ori[0] /= np.pi
+        uav_ori[1] /= (0.5 * np.pi)
+        uav_ori[2] /= np.pi
+
+        uav_ang_vel[0] /= 300
+        uav_ang_vel[1] /= 300
+        uav_ang_vel[2] /= 50
+
+        ng_roll = np.copy(self.NarrowGap.rotation)
+        ng_pitch = np.copy(self.NarrowGap.tilt)
+        ng_roll /= np.pi
+        ng_pitch /= (0.5 * np.pi)
+        ng_ori = [ng_roll, ng_pitch, 0]
+        normalized_obs = np.concatenate([
+            to_goal_pos,
+            uav_vel,
+            uav_ori,
+            uav_ang_vel,
+            ng_ori
+        ]).astype(np.float32)
+        return normalized_obs
 
     def step(self, action):
         self.current_step += 1
@@ -376,10 +255,6 @@ class Quad2NGEnv(gym.Env):
 
         # 检查碰撞状态
         collision = self.detector.efficient_collision_check(self.uav, self.NarrowGap)
-
-        # 计算奖励
-        reward_step = self.reward_calculator.calculate_reward(self.uav, self.NarrowGap, self.goal_position, collision)
-
         # 终止条件
         terminated = (
                 collision or
@@ -387,12 +262,9 @@ class Quad2NGEnv(gym.Env):
                 self.current_step >= self.max_steps
         )
         truncated = False
-        info = {
-            "collision": collision,
-            "goal_achieved": self.achieve_goal(),
-            "distance_to_goal": np.linalg.norm(self.uav.position - self.goal_position),
-            "steps": self.current_step
-        }
+        # 计算奖励
+        reward_step = self.reward_calculator.calculate_reward(self.uav, self.NarrowGap, self.NarrowGap.center,
+                                                              collision)
 
         # 记录数据
         self.trajectory_history.append(self.uav.position.copy())
@@ -400,19 +272,38 @@ class Quad2NGEnv(gym.Env):
         self.velocity_history.append(self.uav.velocity.copy())
         self.reward_history.append(reward_step)
 
-        return self.uav.get_obs(), reward_step, terminated, truncated, info
+        #  保存绘制
+        if terminated or truncated:
+            self.current_episode += 1
+            if self.plot:
+                save_data_dir = os.path.join("Quad2NGEnv_data")
+                data_filepath = self.save_fly_data(save_data_dir)
+                self.save_fly_data()
+                from Env.episode_visualizer import EpisodeVisualizer
+                visualizer = EpisodeVisualizer()
+                save_plot_dir = os.path.join("QuadFlyEnv_plot")
+                visualizer.draw_fly_data(data_filepath=data_filepath, save_plot_dir=save_plot_dir)
+
+        self._check_level_unlock(self.achieve_goal())
+
+        info = {
+            "collision": collision,
+            "goal_achieved": self.achieve_goal(),
+            "distance_to_goal": np.linalg.norm(self.uav.position - self.NarrowGap.center),
+            "steps": self.current_step
+        }
+
+        return self.get_obs(), reward_step, terminated, truncated, info
 
     def apply_randomization(self):
         """应用环境随机化"""
         # 位置和姿态随机化
         self.uav.position += np.random.normal(0, 0.002, 3)
-        self.uav.orientation += np.random.normal(0, 0.01, 3)
+        self.uav.orientation += np.random.normal(0, 0.02, 3)
         self.uav.velocity += np.random.normal(0, 0.05, 3)
         self.uav.angular_velocity += np.random.normal(0, 0.05, 3)
 
-        # 质量随机化
-        self.uav.mass *= (1 + np.random.normal(0, 0.1))
-
+    #  TODO
     def increase_difficulty(self):
         """增加环境难度"""
         if self.current_difficulty < len(self.difficulty_levels) - 1:
@@ -438,11 +329,10 @@ class Quad2NGEnv(gym.Env):
 
     def achieve_goal(self):
         # 计算无人机到缝隙平面的距离（沿法向量方向）
-        dist_to_gap = np.linalg.norm(self.uav.position - self.goal_position)
+        dist_to_gap = np.linalg.norm(self.uav.position - self.NarrowGap.center)
 
         # 判断是否到达达目标区域
-        goal_distance = 0.5 * self.NarrowGap.gap_thickness + 0.5 * self.uav.size[0]
-        if dist_to_gap < goal_distance:
+        if dist_to_gap < self.goal_tolerance:
             return True
         return False
 
@@ -462,3 +352,40 @@ class Quad2NGEnv(gym.Env):
             'velocities': np.array(self.velocity_history[:min_length]),
             'rewards': np.array(self.reward_history[:min_length])
         }
+
+    def save_fly_data(self, save_dir=None):
+        # 如果未提供保存目录，则使用默认目录
+        if save_dir is None:
+            save_dir = f"Quad2NGEnv_data"
+        os.makedirs(save_dir, exist_ok=True)
+
+        # 构建包含缝隙信息的文件名
+        filename = (f"episode{self.current_episode}_reward{sum(self.reward_history):.2f}_"
+                    f"goal_achieved{self.achieve_goal()}.json")
+        filepath = os.path.join(save_dir, filename)
+
+        # 收集缝隙相关数据
+        gap_data = {
+            'center': self.NarrowGap.center.tolist(),
+            'gap_length': self.NarrowGap.gap_length,
+            'gap_height': self.NarrowGap.gap_height,
+            'gap_thickness': self.NarrowGap.gap_thickness,
+            'rotation': self.NarrowGap.rotation,
+            'tilt': self.NarrowGap.tilt,
+        }
+
+        episode_data = {
+            'trajectory': [arr.tolist() for arr in self.trajectory_history],
+            'orientations': [arr.tolist() for arr in self.orientation_history],
+            'velocities': [arr.tolist() for arr in self.velocity_history],
+            'rewards': self.reward_history,
+            'goal_position': (self.NarrowGap.center[0] + self.NarrowGap.gap_half_thickness),
+            'narrow_gap': gap_data,
+            'total_steps': self.current_step,
+            'goal_achieved': self.achieve_goal()
+        }
+
+        with open(filepath, 'w') as f:
+            json.dump(episode_data, f, indent=2)
+
+        return filepath

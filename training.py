@@ -3,7 +3,7 @@ import torch
 import os
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
-from Env.Env import QuadFlyEnv
+from Env.Env import Quad2NGEnv
 from uhtk.mcv_log_manager import LogManager
 from uhtk.VISUALIZE.mcom import mcom
 from SAC_agent import SACAgent
@@ -11,9 +11,9 @@ from SAC_agent import SACAgent
 torch.set_num_threads(1)
 
 episode_num = 200000
-step_num = 200
+step_num = 500
 plot_reward = False
-env = QuadFlyEnv(goal_position=np.array([3.0, 3.0, 3.0]))
+env = Quad2NGEnv()
 
 # 获取状态和动作维度
 state_dim = env.observation_space.shape[0]

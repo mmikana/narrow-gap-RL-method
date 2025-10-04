@@ -82,22 +82,22 @@ class QuadrotorDynamics:
         from scipy.spatial.transform import Rotation
         return Rotation.from_euler('xyz', self.orientation).as_matrix()
 
-    def get_obs(self):
-        """获取当前无人机的观测状态，返回一个NumPy数组。
-        Returns:
-            np.ndarray: 形状为 (12,) 的数组，包含：
-                - 位置 [x, y, z]
-                - 速度 [vX, vY, vZ]
-                - 姿态 [roll, pitch, yaw]
-                - 角速度 [ωX, ωY, ωZ]
-        """
-        observation = np.concatenate([
-            self.position,  # [x, y, z]
-            self.velocity,  # [vX, vY, vZ]
-            self.orientation,  # [roll, pitch, yaw]
-            self.angular_velocity  # [ωX, ωY, ωZ]
-        ])
-        return observation.astype(np.float32)  # 统一数据类型
+    # def get_obs(self):
+    #     """获取当前无人机的观测状态，返回一个NumPy数组。
+    #     Returns:
+    #         np.ndarray: 形状为 (12,) 的数组，包含：
+    #             - 位置 [x, y, z]
+    #             - 速度 [vX, vY, vZ]
+    #             - 姿态 [roll, pitch, yaw]
+    #             - 角速度 [ωX, ωY, ωZ]
+    #     """
+    #     observation = np.concatenate([
+    #         self.position,  # [x, y, z]
+    #         self.velocity,  # [vX, vY, vZ]
+    #         self.orientation,  # [roll, pitch, yaw]
+    #         self.angular_velocity  # [ωX, ωY, ωZ]
+    #     ])
+    #     return observation.astype(np.float32)  # 统一数据类型
 
     def update(self, motor_speeds, dt=0.2):
 

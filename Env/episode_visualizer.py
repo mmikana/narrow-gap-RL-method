@@ -48,7 +48,7 @@ class EpisodeVisualizer:
             raw_data = json.load(f)
 
         # 3. 数据格式转换：列表 → numpy数组（确保维度和类型正确）
-        visualized_data = self._convert_raw_data(raw_data)
+        visualized_data = self._convert_raw_data2(raw_data)
 
         # 4. 处理图表保存目录（默认与数据文件同目录，避免手动指定）
         if save_plot_dir is None:
@@ -75,7 +75,7 @@ class EpisodeVisualizer:
         self.fig = plt.figure(figsize=(20, 20), constrained_layout=True)
         self.setup_layout()
 
-        print(f"完整流程完成：数据文件 → 可视化图表\n数据路径：{data_filepath}\n图表路径：{plot_filepath}")
+
         return plot_filepath
 
     def visualize_episode(self, **kwargs):
@@ -302,9 +302,6 @@ class EpisodeVisualizer:
 
     def _plot_reward_vs_time(self, time_steps, rewards):
         """绘制奖励随时间变化曲线"""
-        # 绘制每步奖励曲线
-        self.ax_reward.plot(time_steps, rewards, 'purple', linewidth=2, label='Step Reward')
-
         # 计算并绘制累积奖励曲线
         cumulative_rewards = np.cumsum(rewards)
         self.ax_reward.plot(time_steps, cumulative_rewards, 'orange', linestyle='--',
@@ -321,7 +318,7 @@ class EpisodeVisualizer:
         self.ax_reward.legend(loc='upper right', fontsize=8)
         self.ax_reward.grid(True, alpha=0.3)
 
-    def _convert_raw_data(self, raw_data):
+    def _convert_raw_data1(self, raw_data):
         """
         辅助方法：将JSON读取的原始列表数据转换为visualize_episode所需的numpy数组格式
         处理逻辑：确保轨迹、姿态、速度等核心数据为(N,3)数组，奖励为(N,)数组
@@ -339,27 +336,82 @@ class EpisodeVisualizer:
             # 目标位置：列表 → (3,) numpy数组
             'goal_position': np.array(raw_data['goal_position'], dtype=np.float64)
         }
-
-        # 调试信息：打印数组形状以确认维度
-        print(f"轨迹数据形状: {converted['trajectory'].shape}")
-        print(f"姿态数据形状: {converted['orientations'].shape}")
-        print(f"速度数据形状: {converted['velocities'].shape}")
-        print(f"奖励数据形状: {converted['rewards'].shape}")
-        print(f"目标位置形状: {converted['goal_position'].shape}")
-
-        # 验证核心数据维度（避免可视化时索引越界）
-        n_steps = len(converted['trajectory'])
-        assert len(converted['orientations']) == n_steps, "姿态数据与轨迹步数不匹配"
-        assert len(converted['velocities']) == n_steps, "速度数据与轨迹步数不匹配"
-        assert len(converted['rewards']) == n_steps, "奖励数据与轨迹步数不匹配"
-        assert converted['goal_position'].shape == (3,), "目标位置维度应为(3,)"
-
         return converted
 
     def save_plot(self, filename, dpi=300):
         plt.savefig(filename, dpi=dpi, bbox_inches='tight')
-        print(f"图表已保存至: {filename}")
 
     def show(self):
         """显示图表"""
         plt.show()
+
+    def _convert_raw_data2(self, raw_data):
+        """
+        辅助方法：将JSON读取的原始列表数据转换为visualize_episode所需的numpy数组格式
+        处理逻辑：修复目标位置维度问题，完善窄缝数据转换
+        """
+        # 处理目标位置：确保为(3,) numpy数组
+        goal_pos = raw_data['goal_position']
+        if isinstance(goal_pos, (int, float)):
+            # 若为标量，默认扩展为[x, 0, 0]格式（根据业务场景可调整）
+            goal_position = np.array([goal_pos, 0.0, 0.0], dtype=np.float64)
+        else:
+            # 若为列表，转换为数组并确保3维
+            goal_position = np.array(goal_pos, dtype=np.float64)
+            if goal_position.ndim == 0:
+                goal_position = np.array([goal_position.item(), 0.0, 0.0])
+            elif len(goal_position) < 3:
+                pad_length = 3 - len(goal_position)
+                goal_position = np.pad(goal_position, (0, pad_length), mode='constant')
+
+        # 核心数据转换（必选字段）
+        converted = {
+            'trajectory': np.array(raw_data['trajectory'], dtype=np.float64),
+            'orientations': np.array(raw_data['orientations'], dtype=np.float64),
+            'velocities': np.array(raw_data['velocities'], dtype=np.float64),
+            'rewards': np.array(raw_data['rewards'], dtype=np.float64),
+            'goal_position': goal_position
+        }
+
+        # 处理窄缝数据（可选字段）
+        if 'narrow_gap' in raw_data and raw_data['narrow_gap'] is not None:
+            gap_data = raw_data['narrow_gap']
+
+            # 创建窄缝数据类（模拟原有窄缝对象的属性和方法）
+            class NarrowGap:
+                def __init__(self, data):
+                    self.center = np.array(data['center'], dtype=np.float64)
+                    self.rotation = data['rotation']
+                    self.tilt = data['tilt']
+                    self.gap_length = data['gap_length']
+                    self.gap_height = data['gap_height']
+                    self.gap_thickness = data['gap_thickness']
+
+                def get_gap_corners(self):
+                    """计算窄缝的8个角点坐标"""
+                    # 简化计算：基于中心、尺寸和旋转角度生成角点
+                    # 实际场景可能需要更复杂的坐标转换逻辑
+                    half_l = self.gap_length / 2
+                    half_h = self.gap_height / 2
+                    half_t = self.gap_thickness / 2
+
+                    # 基础角点（未旋转状态）
+                    corners = [
+                        [half_l, half_h, half_t],
+                        [-half_l, half_h, half_t],
+                        [-half_l, -half_h, half_t],
+                        [half_l, -half_h, half_t],
+                        [half_l, half_h, -half_t],
+                        [-half_l, half_h, -half_t],
+                        [-half_l, -half_h, -half_t],
+                        [half_l, -half_h, -half_t]
+                    ]
+
+                    # 应用旋转（简化为绕Z轴旋转）
+                    rot = R.from_euler('z', self.rotation).as_matrix()
+                    rotated_corners = [np.dot(rot, np.array(c)) + self.center for c in corners]
+                    return np.array(rotated_corners)
+
+            converted['narrow_gap'] = NarrowGap(gap_data)
+
+        return converted
